@@ -19,6 +19,8 @@ public struct ConciergeConfiguration: Codable {
     var conversationId: String?
     var datastream: String?
     var ecid: String?
+    /// The Edge Identity identityMap, forwarded verbatim in request payloads. Excluded from `Codable` - not persisted.
+    var identityMap: [String: Any]?
     var server: String?
 
     /// The session ID for this configuration.
@@ -52,6 +54,7 @@ public struct ConciergeConfiguration: Codable {
          conversationId: String? = nil,
          datastream: String? = nil,
          ecid: String? = nil,
+         identityMap: [String: Any]? = nil,
          server: String? = nil,
          sessionId: String? = nil,
          surfaces: [String] = []) {
@@ -59,6 +62,7 @@ public struct ConciergeConfiguration: Codable {
         self.conversationId = conversationId
         self.datastream = datastream
         self.ecid = ecid
+        self.identityMap = identityMap
         self.server = server
         self._sessionId = sessionId
         self.surfaces = surfaces

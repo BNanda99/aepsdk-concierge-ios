@@ -312,13 +312,8 @@ final class ChatController: ObservableObject {
         let feedbackEventData: [String: Any] = [
             ConciergeConstants.Request.Keys.XDM: [
                 ConciergeConstants.Request.Keys.EVENT_TYPE: ConciergeConstants.Request.EventType.CONVERSATION_FEEDBACK,
-                ConciergeConstants.Request.Keys.IDENTITY_MAP: [
-                    ConciergeConstants.Request.Keys.ECID: [
-                        [
-                            ConciergeConstants.Request.Keys.ID: configuration.ecid
-                        ]
-                    ]
-                ],
+                // Forward identityMap verbatim; empty object if unavailable
+                ConciergeConstants.Request.Keys.IDENTITY_MAP: configuration.identityMap ?? [:],
                 ConciergeConstants.Request.Keys.CONVERSATION: [
                     ConciergeConstants.Request.Keys.Feedback.FEEDBACK: [
                         ConciergeConstants.Request.Keys.Feedback.SOURCE: ConciergeConstants.Request.Values.Feedback.END_USER,

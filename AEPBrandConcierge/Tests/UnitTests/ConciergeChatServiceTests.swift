@@ -20,11 +20,13 @@ final class ConciergeChatServiceTests: XCTestCase {
     private func makeConfiguration(
         consentCollectValue: String? = nil,
         ecid: String = "test-ecid-12345",
+        identityMap: [String: Any]? = nil,
         surfaces: [String] = ["web://test.adobe.com/surface"]
     ) -> ConciergeConfiguration {
         return ConciergeConfiguration(
             consentCollectValue: consentCollectValue,
             ecid: ecid,
+            identityMap: identityMap,
             surfaces: surfaces
         )
     }
@@ -185,6 +187,66 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertNotNil(event?["meta"], "Event should contain 'meta' object")
     }
     
+    // MARK: - identityMap Forwarding Tests
+
+    private func extractXdmIdentityMap(from event: [String: Any]) -> [String: Any]? {
+        guard let xdm = event["xdm"] as? [String: Any] else { return nil }
+        return xdm[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+    }
+
+    func test_createChatPayload_withFullIdentityMap_forwardsAllNamespacesVerbatim() throws {
+        // Given
+        let identityMap: [String: Any] = [
+            "ECID": [["id": "test-ecid-12345", "authenticatedState": "ambiguous", "primary": false]],
+            "hashedEmail": [["id": "hashed-email-value", "authenticatedState": "authenticated", "primary": true]],
+            "CRMID": [["id": "crm-id-value"]]
+        ]
+        let configuration = makeConfiguration(identityMap: identityMap)
+        let service = ConciergeChatService(configuration: configuration)
+
+        // When
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+        XCTAssertEqual(ecidEntries?.first?["authenticatedState"] as? String, "ambiguous")
+        XCTAssertEqual(ecidEntries?.first?["primary"] as? Bool, false)
+
+        let hashedEmailEntries = forwardedIdentityMap?["hashedEmail"] as? [[String: Any]]
+        XCTAssertEqual(hashedEmailEntries?.first?["id"] as? String, "hashed-email-value")
+        XCTAssertEqual(hashedEmailEntries?.first?["authenticatedState"] as? String, "authenticated")
+        XCTAssertEqual(hashedEmailEntries?.first?["primary"] as? Bool, true)
+
+        let crmEntries = forwardedIdentityMap?["CRMID"] as? [[String: Any]]
+        XCTAssertEqual(crmEntries?.first?["id"] as? String, "crm-id-value")
+    }
+
+    func test_createChatPayload_withEcidOnlyIdentityMap_stillForwardsEcid() throws {
+        // Regression: ECID-only identityMap (as before this change) still reaches the endpoint
+        let identityMap: [String: Any] = ["ECID": [["id": "test-ecid-12345"]]]
+        let configuration = makeConfiguration(identityMap: identityMap)
+        let service = ConciergeChatService(configuration: configuration)
+
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_createChatPayload_withNilIdentityMap_emitsEmptyObject() throws {
+        // Given: identityMap unavailable
+        let configuration = makeConfiguration(identityMap: nil)
+        let service = ConciergeChatService(configuration: configuration)
+
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        XCTAssertEqual(forwardedIdentityMap?.isEmpty, true)
+    }
+
     // MARK: - Error Cases
     
     func test_createChatPayload_withNilEcid_throwsInvalidEcidError() {

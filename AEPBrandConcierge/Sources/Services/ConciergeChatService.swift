@@ -26,7 +26,7 @@ class ConciergeChatService: NSObject {
     // MARK: - Constants
 
     private let LOG_TAG = "ConciergeChatService"
-    private let apiPath = "/brand-concierge/conversations"
+    private let apiPath = "/brand-concierge/va6/conversations"
 
     // MARK: - Private Properties
 
@@ -167,10 +167,16 @@ class ConciergeChatService: NSObject {
     /// - Returns: JSON data for the request body
     /// - Note: Internal visibility for testing
     func createChatPayload(query: String) throws -> Data {
-        guard let ecid = configuration.ecid else { throw ConciergeError.invalidEcid("Unable to create concierge request payload. ECID is nil.") }
+        // ECID here is only the readiness gate; the full identityMap is forwarded below
+        guard configuration.ecid != nil else { throw ConciergeError.invalidEcid("Unable to create concierge request payload. ECID is nil.") }
         guard !configuration.surfaces.isEmpty else { throw ConciergeError.invalidSurfaces("Unable to create concierge request payload. No surfaces were provided.") }
 
         let consentState = ConsentState(configValue: configuration.consentCollectValue).payloadValue
+
+        // Forward identityMap verbatim (all namespaces); empty object if unavailable
+        let identityMapPayload: [String: Any] = USE_TEMPS
+            ? [ConciergeConstants.Request.Keys.ECID: [[ConciergeConstants.Request.Keys.ID: TEMP_ecid]]]
+            : (configuration.identityMap ?? [:])
 
         let payload = [
             ConciergeConstants.Request.Keys.EVENTS: [
@@ -182,13 +188,7 @@ class ConciergeChatService: NSObject {
                         ]
                     ],
                     ConciergeConstants.Request.Keys.XDM: [
-                        ConciergeConstants.Request.Keys.IDENTITY_MAP: [
-                            ConciergeConstants.Request.Keys.ECID: [
-                                [
-                                    ConciergeConstants.Request.Keys.ID: USE_TEMPS ? TEMP_ecid : ecid
-                                ]
-                            ]
-                        ]
+                        ConciergeConstants.Request.Keys.IDENTITY_MAP: identityMapPayload
                     ],
                     ConciergeConstants.Request.Keys.Consent.META: [
                         ConciergeConstants.Request.Keys.Consent.CONSENT: [

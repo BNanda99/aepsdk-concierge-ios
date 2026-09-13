@@ -128,6 +128,9 @@ public class Concierge: NSObject, Extension {
             return
         }
 
+        let identityMap = edgeIdentitySharedState.identityMap
+        Log.debug(label: ConciergeConstants.LOG_TAG, "Updating concierge configuration with identityMap namespaces: \(identityMap?.keys.sorted() ?? [])")
+
         guard let server = configSharedState.conciergeServer else {
             errorMessage = "Unable to show Brand Concierge UI - server information is unavailable from configuration."
             return
@@ -143,7 +146,7 @@ public class Concierge: NSObject, Extension {
             return
         }
 
-        let config = ConciergeConfiguration(consentCollectValue: consentValue, datastream: datastream, ecid: ecid, server: server, surfaces: surfaces)
+        let config = ConciergeConfiguration(consentCollectValue: consentValue, datastream: datastream, ecid: ecid, identityMap: identityMap, server: server, surfaces: surfaces)
         let responseEvent = event.createResponseEvent(name: ConciergeConstants.EventName.SHOW_UI_RESPONSE,
                                                       type: ConciergeConstants.EventType.concierge,
                                                       source: EventSource.responseContent,
