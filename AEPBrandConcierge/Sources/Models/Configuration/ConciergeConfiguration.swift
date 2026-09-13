@@ -22,6 +22,7 @@ public struct ConciergeConfiguration: Codable {
     /// The Edge Identity identityMap, forwarded verbatim in request payloads. Excluded from `Codable` - not persisted.
     var identityMap: [String: Any]?
     var server: String?
+    var region: String?
 
     /// The session ID for this configuration.
     /// On first access, retrieves an existing valid session from persistence or creates a new one.
@@ -48,6 +49,7 @@ public struct ConciergeConfiguration: Codable {
         case server
         case sessionId
         case surfaces
+        case region
     }
 
     init(consentCollectValue: String? = nil,
@@ -57,6 +59,7 @@ public struct ConciergeConfiguration: Codable {
          identityMap: [String: Any]? = nil,
          server: String? = nil,
          sessionId: String? = nil,
+         region: String? = nil,
          surfaces: [String] = []) {
         self.consentCollectValue = consentCollectValue
         self.conversationId = conversationId
@@ -64,6 +67,7 @@ public struct ConciergeConfiguration: Codable {
         self.ecid = ecid
         self.identityMap = identityMap
         self.server = server
+        self.region = region
         self._sessionId = sessionId
         self.surfaces = surfaces
     }
@@ -76,6 +80,7 @@ public struct ConciergeConfiguration: Codable {
         datastream = try container.decodeIfPresent(String.self, forKey: .datastream)
         ecid = try container.decodeIfPresent(String.self, forKey: .ecid)
         server = try container.decodeIfPresent(String.self, forKey: .server)
+        region = try container.decodeIfPresent(String.self, forKey: .region)
         _sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
         surfaces = try container.decodeIfPresent([String].self, forKey: .surfaces) ?? []
     }
@@ -88,6 +93,7 @@ public struct ConciergeConfiguration: Codable {
         try container.encodeIfPresent(datastream, forKey: .datastream)
         try container.encodeIfPresent(ecid, forKey: .ecid)
         try container.encodeIfPresent(server, forKey: .server)
+        try container.encodeIfPresent(region, forKey: .region)
         try container.encodeIfPresent(_sessionId, forKey: .sessionId)
         try container.encode(surfaces, forKey: .surfaces)
     }
@@ -98,7 +104,8 @@ extension ConciergeConfiguration {
     func hasSameChatServiceIdentity(as other: ConciergeConfiguration) -> Bool {
         guard ecid == other.ecid,
               server == other.server,
-              datastream == other.datastream else {
+              datastream == other.datastream,
+              region == other.region else {
             return false
         }
         return Set(surfaces) == Set(other.surfaces)
