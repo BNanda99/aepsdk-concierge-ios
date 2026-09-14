@@ -208,7 +208,7 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertNotNil(event?["meta"], "Event should contain 'meta' object")
     }
     
-    // MARK: - identityMap Forwarding Tests
+    // identityMap Forwarding Tests
 
     private func extractXdmIdentityMap(from event: [String: Any]) -> [String: Any]? {
         guard let xdm = event["xdm"] as? [String: Any] else { return nil }

@@ -138,6 +138,7 @@ public class Concierge: NSObject, Extension {
             return
         }
 
+        // Log namespace names only, never id values (PII)
         let identityMap = edgeIdentitySharedState.identityMap
         Log.debug(label: ConciergeConstants.LOG_TAG, "Updating concierge configuration with identityMap namespaces: \(identityMap?.keys.sorted() ?? [])")
 

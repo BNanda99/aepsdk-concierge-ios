@@ -894,7 +894,7 @@ final class ChatControllerTests: XCTestCase {
         XCTAssertEqual(events.first?.data?[ConciergeConstants.TrackingEvent.EventData.Key.URL] as? String, "https://example.com/terms")
     }
 
-    // MARK: - Feedback identityMap Forwarding Tests
+    // Feedback identityMap Forwarding Tests
 
     /// Appends a completed message with a payload so `sendFeedbackFor` can act on it; returns its id.
     private func appendFeedbackEligibleMessage(to controller: ChatController, conversationId: String = "conv-1", interactionId: String = "int-1") -> UUID {

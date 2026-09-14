@@ -16,7 +16,7 @@ import XCTest
 
 final class SharedStateResultConciergeTests: XCTestCase {
 
-    // MARK: - identityMap Tests
+    // identityMap Tests
 
     func test_identityMap_withFullMap_returnsVerbatim() {
         // Given
