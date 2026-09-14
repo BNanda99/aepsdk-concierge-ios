@@ -21,4 +21,9 @@ extension Event {
     var isShowUiEvent: Bool {
         type == ConciergeConstants.EventType.concierge && source == EventSource.requestContent
     }
+
+    /// Whether this event is an app-originated data-handoff request.
+    var isDataHandoffEvent: Bool {
+        type == ConciergeConstants.EventType.concierge && source == ConciergeConstants.EventSource.dataHandoff
+    }
 }

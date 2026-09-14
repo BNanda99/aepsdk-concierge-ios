@@ -49,6 +49,10 @@ public enum ConciergeConstants {
         public static let concierge = "com.adobe.eventType.concierge"
     }
 
+    public enum EventSource {
+        public static let dataHandoff = "com.adobe.eventSource.concierge.dataHandoff"
+    }
+
     /// Values stored under `TrackingEvent.EventData.Key.FEEDBACK_TYPE` for `feedback:submitted` events.
     public enum ChatInteraction {
         public static let POSITIVE = "positive"
@@ -63,12 +67,24 @@ public enum ConciergeConstants {
         static let SHOW_UI = "Show Brand Concierge UI - Request"
         static let SHOW_UI_RESPONSE = "Show Brand Concierge UI - Response"
         static let FEEDBACK = "Brand Concierge - Chat Feedback"
+        static let DATA_HANDOFF = "Concierge Data Handoff"
+        static let DATA_HANDOFF_RESPONSE = "Concierge Data Handoff Response"
     }
 
     internal enum EventData {
         enum Key {
             static let CONFIG = "config"
             static let SURFACES = "surfaces"
+        }
+    }
+
+    /// Values for the app-facing data-handoff event. Public, since consumer apps construct the
+    /// request event's data and parse the response event's data directly (no wrapper API).
+    public enum DataHandoffEventData {
+        public enum Key {
+            public static let PAYLOAD = "dataHandoffEvent"
+            public static let ACCEPTED = "accepted"
+            public static let REJECT_REASON = "rejectReason"
         }
     }
 
