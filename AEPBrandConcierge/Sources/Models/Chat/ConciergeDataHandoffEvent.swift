@@ -25,12 +25,20 @@ import Foundation
 /// `["commerce": ["order": ["purchaseID": "123"]]]`. The SDK never reads or validates the
 /// business meaning of these values; the customer's own nesting defines the destination.
 /// Must not use `identityMap` (or any other SDK-reserved top-level XDM key) as a top-level key.
+///
+/// `localMessage` is text rendered immediately in the chat transcript as a local, non-networked
+/// message — distinct from `routingHint`/`xdmFields`, which are forwarded to Brand Concierge.
+/// Present and non-empty -> shown immediately. `nil`/empty -> nothing shown locally; the
+/// conversation only gets whatever Product Advisor eventually replies with, same as if this
+/// field didn't exist.
 public struct ConciergeDataHandoffEvent {
     public let routingHint: String
     public let xdmFields: [String: Any]
+    public let localMessage: String?
 
-    public init(routingHint: String, xdmFields: [String: Any]) {
+    public init(routingHint: String, xdmFields: [String: Any], localMessage: String? = nil) {
         self.routingHint = routingHint
         self.xdmFields = xdmFields
+        self.localMessage = localMessage
     }
 }

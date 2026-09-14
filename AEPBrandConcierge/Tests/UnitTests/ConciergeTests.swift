@@ -53,6 +53,17 @@ final class ConciergeTests: XCTestCase {
         XCTAssertNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
     }
 
+    func test_validPayload_withLocalMessage_respondsAccepted() {
+        let payload = ConciergeDataHandoffEvent(routingHint: "successful-checkout",
+                                                xdmFields: ["commerce": ["order": ["purchaseID": "123"]]],
+                                                localMessage: "Your order is confirmed!")
+
+        let response = dispatchDataHandoff(payload: payload)
+
+        XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, true)
+        XCTAssertNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
+    }
+
     func test_missingOrMiscastPayload_respondsRejected() {
         let response = dispatchDataHandoff(payload: "not the right type")
 
