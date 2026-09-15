@@ -85,14 +85,6 @@ public class Concierge: NSObject, Extension {
     }
 
     public func readyForEvent(_ event: Event) -> Bool {
-        // Data-handoff events are validated and accepted/rejected locally, with no dependency on
-        // configuration or EdgeIdentity in this phase - exempting them here avoids head-of-line
-        // blocking the shared per-extension event queue (a strict FIFO - see `OperationOrderer`)
-        // on shared state this listener doesn't use.
-        if event.isDataHandoffEvent {
-            return true
-        }
-
         // Hard dependency on configuration for server and datastream information
         guard let _ = getConfiguration(for: event) else {
             Log.trace(label: ConciergeConstants.LOG_TAG, "Event processing is paused - waiting for valid configuration.")
