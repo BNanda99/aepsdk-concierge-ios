@@ -70,7 +70,7 @@ public extension Concierge {
         routingHint: String,
         xdmFields: [String: Any],
         localMessage: String? = nil,
-        completion: (@MainActor (_ accepted: Bool, _ rejectReason: String?) -> Void)? = nil
+        completion: (@MainActor (_ accepted: Bool, _ rejectReason: ConciergeDataHandoffRejectReason?) -> Void)? = nil
     ) {
         let payload = ConciergeDataHandoffEvent(routingHint: routingHint, xdmFields: xdmFields, localMessage: localMessage)
         let event = Event(name: ConciergeConstants.EventName.DATA_HANDOFF,
@@ -81,7 +81,8 @@ public extension Concierge {
         MobileCore.dispatch(event: event, timeout: ConciergeConstants.DEFAULT_TIMEOUT) { response in
             guard let completion = completion else { return }
             let accepted = response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool ?? false
-            let rejectReason = response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] as? String
+            let rejectReasonRaw = response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] as? String
+            let rejectReason = rejectReasonRaw.flatMap(ConciergeDataHandoffRejectReason.init(rawValue:)) ?? (accepted ? nil : .noResponse)
             Task { @MainActor in
                 completion(accepted, rejectReason)
             }

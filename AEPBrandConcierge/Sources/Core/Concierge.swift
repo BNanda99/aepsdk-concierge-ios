@@ -179,22 +179,27 @@ public class Concierge: NSObject, Extension {
         Log.trace(label: ConciergeConstants.LOG_TAG, "Received data handoff event - '\(event.id.uuidString)'.")
 
         guard let payload = event.data?[ConciergeConstants.DataHandoffEventData.Key.PAYLOAD] as? ConciergeDataHandoffEvent else {
-            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: "Missing or malformed data handoff payload."))
+            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: .missingEventData))
             return
         }
 
         guard !payload.routingHint.isEmpty else {
-            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: "routingHint must not be empty."))
+            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: .missingRoutingHint))
+            return
+        }
+
+        guard !payload.xdmFields.isEmpty else {
+            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: .emptyXdmFields))
             return
         }
 
         guard JSONSerialization.isValidJSONObject(payload.xdmFields) else {
-            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: "xdmFields must be a valid JSON-serializable dictionary."))
+            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: .invalidXdmFieldValue))
             return
         }
 
         guard payload.xdmFields[ConciergeConstants.Request.Keys.IDENTITY_MAP] == nil else {
-            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: "xdmFields must not use the reserved top-level key '\(ConciergeConstants.Request.Keys.IDENTITY_MAP)'."))
+            dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: .reservedKeyCollision))
             return
         }
 
@@ -202,15 +207,15 @@ public class Concierge: NSObject, Extension {
         dispatch(event: createDataHandoffResponseEvent(for: event, rejectReason: nil))
     }
 
-    private func createDataHandoffResponseEvent(for event: Event, rejectReason: String?) -> Event {
+    private func createDataHandoffResponseEvent(for event: Event, rejectReason: ConciergeDataHandoffRejectReason?) -> Event {
         if let rejectReason = rejectReason {
-            Log.warning(label: ConciergeConstants.LOG_TAG, "Rejected data handoff event '\(event.id.uuidString)': \(rejectReason)")
+            Log.warning(label: ConciergeConstants.LOG_TAG, "Rejected data handoff event '\(event.id.uuidString)': \(rejectReason.rawValue)")
         }
 
         var data: [String: Any] = [
             ConciergeConstants.DataHandoffEventData.Key.ACCEPTED: rejectReason == nil
         ]
-        data[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] = rejectReason
+        data[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] = rejectReason?.rawValue
 
         return event.createResponseEvent(name: ConciergeConstants.EventName.DATA_HANDOFF_RESPONSE,
                                          type: ConciergeConstants.EventType.concierge,

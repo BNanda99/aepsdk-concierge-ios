@@ -44,3 +44,23 @@ struct ConciergeDataHandoffEvent {
         self.localMessage = localMessage
     }
 }
+
+/// Why the SDK rejected a `Concierge.sendDataHandoff(...)` call, or (`.noResponse`) that no
+/// response arrived at all. Values are shared with the Android SDK's equivalent API for
+/// cross-platform consistency - keep the raw values in sync with
+/// `ConciergeConstants.DataHandoff.RejectReason` in aepsdk-concierge-android.
+public enum ConciergeDataHandoffRejectReason: String {
+    /// The SDK received no payload at all for this request - an internal wiring issue, not
+    /// something a caller of `sendDataHandoff` can trigger directly.
+    case missingEventData = "missing_event_data"
+    /// `routingHint` was empty (or blank).
+    case missingRoutingHint = "missing_routing_hint"
+    /// `xdmFields` was empty.
+    case emptyXdmFields = "empty_xdm_fields"
+    /// `xdmFields` contained a value that isn't JSON-serializable.
+    case invalidXdmFieldValue = "invalid_xdm_field_value"
+    /// `xdmFields` used a reserved top-level key (e.g. `identityMap`).
+    case reservedKeyCollision = "reserved_key_collision"
+    /// The extension never responded (e.g. the call timed out).
+    case noResponse = "no_response"
+}

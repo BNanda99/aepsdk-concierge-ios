@@ -41,6 +41,11 @@ final class ConciergeTests: XCTestCase {
         return mockRuntime.firstEvent
     }
 
+    private func rejectReason(of response: Event?) -> ConciergeDataHandoffRejectReason? {
+        (response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] as? String)
+            .flatMap(ConciergeDataHandoffRejectReason.init(rawValue:))
+    }
+
     // MARK: - Tests
 
     func test_validPayload_respondsAccepted() {
@@ -68,7 +73,7 @@ final class ConciergeTests: XCTestCase {
         let response = dispatchDataHandoff(payload: "not the right type")
 
         XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
-        XCTAssertNotNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
+        XCTAssertEqual(rejectReason(of: response), .missingEventData)
     }
 
     func test_emptyRoutingHint_respondsRejected() {
@@ -78,7 +83,16 @@ final class ConciergeTests: XCTestCase {
         let response = dispatchDataHandoff(payload: payload)
 
         XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
-        XCTAssertNotNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
+        XCTAssertEqual(rejectReason(of: response), .missingRoutingHint)
+    }
+
+    func test_emptyXdmFields_respondsRejected() {
+        let payload = ConciergeDataHandoffEvent(routingHint: "successful-checkout", xdmFields: [:])
+
+        let response = dispatchDataHandoff(payload: payload)
+
+        XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
+        XCTAssertEqual(rejectReason(of: response), .emptyXdmFields)
     }
 
     func test_nonSerializableXdmFields_respondsRejected() {
@@ -88,7 +102,7 @@ final class ConciergeTests: XCTestCase {
         let response = dispatchDataHandoff(payload: payload)
 
         XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
-        XCTAssertNotNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
+        XCTAssertEqual(rejectReason(of: response), .invalidXdmFieldValue)
     }
 
     func test_reservedTopLevelKey_respondsRejected() {
@@ -98,7 +112,7 @@ final class ConciergeTests: XCTestCase {
         let response = dispatchDataHandoff(payload: payload)
 
         XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
-        XCTAssertNotNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
+        XCTAssertEqual(rejectReason(of: response), .reservedKeyCollision)
     }
 
     // MARK: - readyForEvent
