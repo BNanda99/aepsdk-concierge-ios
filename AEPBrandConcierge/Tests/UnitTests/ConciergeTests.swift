@@ -33,9 +33,9 @@ final class ConciergeTests: XCTestCase {
     // MARK: - Helpers
 
     private func dispatchDataHandoff(payload: Any?) -> Event? {
-        let event = Event(name: "test data handoff event",
+        let event = Event(name: ConciergeConstants.EventName.DATA_HANDOFF,
                           type: ConciergeConstants.EventType.concierge,
-                          source: ConciergeConstants.EventSource.dataHandoff,
+                          source: EventSource.requestContent,
                           data: payload.map { [ConciergeConstants.DataHandoffEventData.Key.PAYLOAD: $0] })
         mockRuntime.simulateComingEvents(event)
         return mockRuntime.firstEvent
@@ -120,9 +120,9 @@ final class ConciergeTests: XCTestCase {
     func test_readyForEvent_dataHandoffEvent_stillRequiresConfigurationAndEdgeIdentity() {
         // No Configuration/EdgeIdentity shared state has been set up on mockRuntime at all -
         // data-handoff events are not exempted from the extension's hard dependency on both.
-        let event = Event(name: "test data handoff event",
+        let event = Event(name: ConciergeConstants.EventName.DATA_HANDOFF,
                           type: ConciergeConstants.EventType.concierge,
-                          source: ConciergeConstants.EventSource.dataHandoff,
+                          source: EventSource.requestContent,
                           data: nil)
 
         XCTAssertFalse(concierge.readyForEvent(event))

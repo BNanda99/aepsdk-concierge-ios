@@ -49,10 +49,6 @@ public enum ConciergeConstants {
         public static let concierge = "com.adobe.eventType.concierge"
     }
 
-    internal enum EventSource {
-        static let dataHandoff = "com.adobe.eventSource.concierge.dataHandoff"
-    }
-
     /// Values stored under `TrackingEvent.EventData.Key.FEEDBACK_TYPE` for `feedback:submitted` events.
     public enum ChatInteraction {
         public static let POSITIVE = "positive"

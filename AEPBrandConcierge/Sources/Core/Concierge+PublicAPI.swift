@@ -75,7 +75,7 @@ public extension Concierge {
         let payload = ConciergeDataHandoffEvent(routingHint: routingHint, xdmFields: xdmFields, localMessage: localMessage)
         let event = Event(name: ConciergeConstants.EventName.DATA_HANDOFF,
                           type: ConciergeConstants.EventType.concierge,
-                          source: ConciergeConstants.EventSource.dataHandoff,
+                          source: EventSource.requestContent,
                           data: [ConciergeConstants.DataHandoffEventData.Key.PAYLOAD: payload])
 
         MobileCore.dispatch(event: event, timeout: ConciergeConstants.DEFAULT_TIMEOUT) { response in

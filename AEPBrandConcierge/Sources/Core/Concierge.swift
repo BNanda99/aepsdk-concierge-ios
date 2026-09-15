@@ -73,11 +73,6 @@ public class Concierge: NSObject, Extension {
         registerListener(type: ConciergeConstants.EventType.concierge,
                          source: EventSource.notification,
                          listener: handleNotificationEvent)
-
-        // Register listener for app-originated data-handoff events
-        registerListener(type: ConciergeConstants.EventType.concierge,
-                         source: ConciergeConstants.EventSource.dataHandoff,
-                         listener: handleDataHandoffEvent)
     }
 
     public func onUnregistered() {
@@ -103,8 +98,13 @@ public class Concierge: NSObject, Extension {
     // MARK: - Private Methods
 
     private func handleRequestContentEvent(_ event: Event) {
-        if event.isShowUiEvent {
+        switch event.name {
+        case ConciergeConstants.EventName.SHOW_UI:
             handleShowChatUIRequestEvent(event)
+        case ConciergeConstants.EventName.DATA_HANDOFF:
+            handleDataHandoffEvent(event)
+        default:
+            break
         }
     }
 
