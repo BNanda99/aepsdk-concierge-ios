@@ -100,4 +100,27 @@ final class ConciergeTests: XCTestCase {
         XCTAssertEqual(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool, false)
         XCTAssertNotNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON])
     }
+
+    // MARK: - readyForEvent
+
+    func test_readyForEvent_dataHandoffEvent_bypassesConfigurationAndEdgeIdentityDependency() {
+        // No Configuration/EdgeIdentity shared state has been set up on mockRuntime at all.
+        let event = Event(name: "test data handoff event",
+                          type: ConciergeConstants.EventType.concierge,
+                          source: ConciergeConstants.EventSource.dataHandoff,
+                          data: nil)
+
+        XCTAssertTrue(concierge.readyForEvent(event))
+    }
+
+    func test_readyForEvent_nonDataHandoffEvent_stillRequiresConfigurationAndEdgeIdentity() {
+        // No Configuration/EdgeIdentity shared state has been set up on mockRuntime at all -
+        // confirms the data-handoff bypass doesn't loosen the gate for other event kinds.
+        let event = Event(name: "test show ui event",
+                          type: ConciergeConstants.EventType.concierge,
+                          source: EventSource.requestContent,
+                          data: nil)
+
+        XCTAssertFalse(concierge.readyForEvent(event))
+    }
 }

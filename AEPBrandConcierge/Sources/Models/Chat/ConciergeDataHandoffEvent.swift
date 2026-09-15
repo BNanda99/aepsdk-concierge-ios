@@ -16,7 +16,7 @@ import Foundation
 /// Concierge / Product Advisor), outside of normal user-typed chat.
 ///
 /// `routingHint` is a keyword consumed only by Brand Concierge's current phrase-based router
-/// (e.g. "successful-checkout") — the athlete never sees it, and it is not conversational
+/// (e.g. "successful-checkout") — the end user never sees it, and it is not conversational
 /// content. It may become optional once a more deterministic, XDM-field-based routing
 /// approach ships; both fields are required for now.
 ///
