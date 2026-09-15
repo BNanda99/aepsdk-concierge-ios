@@ -48,6 +48,46 @@ public extension Concierge {
         ConciergeAuthTokenResolver.shared.setProvider(provider, timeout: timeout)
     }
 
+    // MARK: - Data Handoff
+
+    /// Hands data to the Concierge SDK to forward toward the agent pipeline (Brand Concierge /
+    /// Product Advisor), outside of normal user-typed chat - e.g. the result of a native checkout flow.
+    ///
+    /// - Parameters:
+    ///   - routingHint: A keyword consumed only by Brand Concierge's current phrase-based router
+    ///     (e.g. "successful-checkout") - the end user never sees it, and it is not conversational
+    ///     content.
+    ///   - xdmFields: Arbitrary XDM-shaped data merged into the root of the XDM object the SDK
+    ///     forwards alongside the routing hint - an ordinary nested dictionary, e.g.
+    ///     `["commerce": ["order": ["purchaseID": "123"]]]`. Must not use `identityMap` as a
+    ///     top-level key.
+    ///   - localMessage: Optional text to render immediately in the chat transcript as a local,
+    ///     non-networked message. `nil`/empty -> nothing shown locally; the conversation only gets
+    ///     whatever Product Advisor eventually replies with.
+    ///   - completion: Called with whether the SDK accepted the payload's shape, and (if rejected)
+    ///     why. Does not confirm delivery to Brand Concierge or Product Advisor.
+    static func sendDataHandoff(
+        routingHint: String,
+        xdmFields: [String: Any],
+        localMessage: String? = nil,
+        completion: (@MainActor (_ accepted: Bool, _ rejectReason: String?) -> Void)? = nil
+    ) {
+        let payload = ConciergeDataHandoffEvent(routingHint: routingHint, xdmFields: xdmFields, localMessage: localMessage)
+        let event = Event(name: ConciergeConstants.EventName.DATA_HANDOFF,
+                          type: ConciergeConstants.EventType.concierge,
+                          source: ConciergeConstants.EventSource.dataHandoff,
+                          data: [ConciergeConstants.DataHandoffEventData.Key.PAYLOAD: payload])
+
+        MobileCore.dispatch(event: event, timeout: ConciergeConstants.DEFAULT_TIMEOUT) { response in
+            guard let completion = completion else { return }
+            let accepted = response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED] as? Bool ?? false
+            let rejectReason = response?.data?[ConciergeConstants.DataHandoffEventData.Key.REJECT_REASON] as? String
+            Task { @MainActor in
+                completion(accepted, rejectReason)
+            }
+        }
+    }
+
     // MARK: - SwiftUI Presentation APIs
 
     /// Shows the Concierge chat UI on top of the wrapped SwiftUI view hierarchy.

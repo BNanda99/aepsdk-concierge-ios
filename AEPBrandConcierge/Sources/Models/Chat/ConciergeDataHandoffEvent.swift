@@ -12,8 +12,10 @@
 
 import Foundation
 
-/// Data the app hands to the Concierge SDK to forward toward the agent pipeline (Brand
-/// Concierge / Product Advisor), outside of normal user-typed chat.
+/// Data the app hands to the Concierge SDK (via `Concierge.sendDataHandoff(...)`) to forward
+/// toward the agent pipeline (Brand Concierge / Product Advisor), outside of normal user-typed
+/// chat. Internal transport container between the public wrapper and the extension's listener -
+/// not constructed by consumer apps directly.
 ///
 /// `routingHint` is a keyword consumed only by Brand Concierge's current phrase-based router
 /// (e.g. "successful-checkout") — the end user never sees it, and it is not conversational
@@ -31,12 +33,12 @@ import Foundation
 /// Present and non-empty -> shown immediately. `nil`/empty -> nothing shown locally; the
 /// conversation only gets whatever Product Advisor eventually replies with, same as if this
 /// field didn't exist.
-public struct ConciergeDataHandoffEvent {
-    public let routingHint: String
-    public let xdmFields: [String: Any]
-    public let localMessage: String?
+struct ConciergeDataHandoffEvent {
+    let routingHint: String
+    let xdmFields: [String: Any]
+    let localMessage: String?
 
-    public init(routingHint: String, xdmFields: [String: Any], localMessage: String? = nil) {
+    init(routingHint: String, xdmFields: [String: Any], localMessage: String? = nil) {
         self.routingHint = routingHint
         self.xdmFields = xdmFields
         self.localMessage = localMessage
