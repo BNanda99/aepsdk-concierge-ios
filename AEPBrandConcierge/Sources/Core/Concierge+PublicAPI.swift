@@ -59,7 +59,8 @@ public extension Concierge {
     ///     content.
     ///   - xdmFields: Arbitrary XDM-shaped data merged into the root of the XDM object the SDK
     ///     forwards alongside the routing hint - an ordinary nested dictionary, e.g.
-    ///     `["commerce": ["order": ["purchaseID": "123"]]]`. Must not use `identityMap` as a
+    ///     `["commerce": ["order": ["purchaseID": "123"]]]`. Must be non-empty, JSON-serializable
+    ///     (see `JSONSerialization.isValidJSONObject`), and must not use `identityMap` as a
     ///     top-level key.
     ///   - localMessage: Optional text to render immediately in the chat transcript as a local,
     ///     non-networked message. `nil`/empty -> nothing shown locally; the conversation only gets

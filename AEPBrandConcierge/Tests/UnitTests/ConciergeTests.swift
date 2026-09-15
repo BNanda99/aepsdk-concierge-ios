@@ -115,6 +115,30 @@ final class ConciergeTests: XCTestCase {
         XCTAssertEqual(rejectReason(of: response), .reservedKeyCollision)
     }
 
+    // MARK: - handleRequestContentEvent routing
+
+    func test_showUiEvent_routesToShowUiHandler_notDataHandoff() {
+        let event = Event(name: ConciergeConstants.EventName.SHOW_UI,
+                          type: ConciergeConstants.EventType.concierge,
+                          source: EventSource.requestContent,
+                          data: nil)
+
+        mockRuntime.simulateComingEvents(event)
+        let response = mockRuntime.firstEvent
+
+        XCTAssertEqual(response?.name, ConciergeConstants.EventName.SHOW_UI_RESPONSE)
+        XCTAssertNil(response?.data?[ConciergeConstants.DataHandoffEventData.Key.ACCEPTED])
+    }
+
+    func test_dataHandoffEvent_respondsWithDataHandoffResponseName_notShowUi() {
+        let payload = ConciergeDataHandoffEvent(routingHint: "successful-checkout",
+                                                xdmFields: ["commerce": ["order": ["purchaseID": "123"]]])
+
+        let response = dispatchDataHandoff(payload: payload)
+
+        XCTAssertEqual(response?.name, ConciergeConstants.EventName.DATA_HANDOFF_RESPONSE)
+    }
+
     // MARK: - readyForEvent
 
     func test_readyForEvent_dataHandoffEvent_stillRequiresConfigurationAndEdgeIdentity() {
