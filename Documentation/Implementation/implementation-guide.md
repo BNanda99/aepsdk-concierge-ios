@@ -193,6 +193,43 @@ Register the provider once, typically alongside extension registration during ap
 
 ---
 
+## Data Handoff
+
+Sometimes the app needs to hand the SDK data that didn't originate from something the user typed or said in chat — for example, the result of a native checkout flow that completed entirely outside the chat UI. `Concierge.sendDataHandoff(...)` forwards that data into the agent pipeline (Brand Concierge / Product Advisor) directly.
+
+```swift
+import AEPBrandConcierge
+
+Concierge.sendDataHandoff(
+    routingHint: "successful-checkout",
+    xdmFields: [
+        "commerce": ["order": ["purchaseID": orderId, "priceTotal": 129.99, "currencyCode": "USD"]]
+    ],
+    localMessage: "Your order is confirmed!"
+) { accepted, rejectReason in
+    // accepted == true  -> the SDK received and validated the payload's shape.
+    // accepted == false -> rejected; check rejectReason and fix the payload before retrying.
+}
+```
+
+#### `Concierge.sendDataHandoff(routingHint:xdmFields:localMessage:completion:)`
+
+- **`routingHint`** *(required)*: A keyword consumed only by Brand Concierge's current phrase-based router (e.g. `"successful-checkout"`) — the end user never sees it, and it is not conversational content.
+- **`xdmFields`** *(required)*: Arbitrary XDM-shaped data merged into the root of the XDM object the SDK forwards alongside the routing hint — an ordinary nested dictionary, e.g. `["commerce": ["order": ["purchaseID": "123"]]]`. Must be non-empty, JSON-serializable, and must not use `identityMap` as a top-level key (reserved by the SDK).
+- **`localMessage`**: Optional text rendered immediately in the chat transcript as a local, non-networked message, distinct from the data forwarded to Brand Concierge. `nil`/empty -> nothing shown locally; the conversation only gets whatever Product Advisor eventually replies with.
+- **`completion`**: Optional closure called once with the outcome. `accepted` reports whether the SDK received and validated the payload's shape — it does not confirm delivery to or processing by Brand Concierge or Product Advisor. When `accepted` is `false`, `rejectReason` is a typed `ConciergeDataHandoffRejectReason` describing why:
+
+  | Reject reason | Meaning |
+  | --- | --- |
+  | `missingEventData` | No payload arrived at all — an internal wiring issue, not something a caller can trigger directly. |
+  | `missingRoutingHint` | `routingHint` was empty (or blank). |
+  | `emptyXdmFields` | `xdmFields` was empty. |
+  | `invalidXdmFieldValue` | `xdmFields` contained a value that isn't JSON-serializable. |
+  | `reservedKeyCollision` | `xdmFields` used a reserved top-level key (e.g. `identityMap`). |
+  | `noResponse` | The extension never responded (e.g. the call timed out). |
+
+---
+
 ## Basic usage
 
 ### API reference
