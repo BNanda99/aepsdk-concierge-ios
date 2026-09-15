@@ -185,10 +185,10 @@ class ConciergeChatService: NSObject {
 
         let consentState = ConsentState(configValue: configuration.consentCollectValue).payloadValue
 
-        // Forward identityMap verbatim (all namespaces); empty object if unavailable
+        // Forward identityMap verbatim; falls back to an ECID-only map
         let identityMapPayload: [String: Any] = USE_TEMPS
             ? [ConciergeConstants.Request.Keys.ECID: [[ConciergeConstants.Request.Keys.ID: TEMP_ecid]]]
-            : (configuration.identityMap ?? [:])
+            : configuration.identityMapPayload
 
         var conversation: [String: Any] = [
             ConciergeConstants.Request.Keys.SURFACES: USE_TEMPS ? [TEMP_surface] : configuration.surfaces,

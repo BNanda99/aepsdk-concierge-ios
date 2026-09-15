@@ -12,6 +12,7 @@
 
 import AEPCore
 import AEPServices
+import Foundation
 
 /// Configuration for the Concierge service connection.
 public struct ConciergeConfiguration: Codable {
@@ -100,6 +101,21 @@ public struct ConciergeConfiguration: Codable {
 }
 
 extension ConciergeConfiguration {
+    /// The identityMap to forward in request payloads; falls back to an ECID-only map so a config that passes the readiness gate still sends ECID.
+    var identityMapPayload: [String: Any] {
+        if let identityMap = identityMap, !identityMap.isEmpty {
+            if JSONSerialization.isValidJSONObject(identityMap) {
+                return identityMap
+            }
+            // Log namespace keys only, never id values (PII)
+            Log.warning(label: ConciergeConstants.LOG_TAG, "identityMap is not valid JSON and will be omitted; namespaces: \(identityMap.keys.sorted())")
+        }
+        if let ecid = ecid {
+            return [ConciergeConstants.Request.Keys.ECID: [[ConciergeConstants.Request.Keys.ID: ecid]]]
+        }
+        return [:]
+    }
+
     /// Whether ECID, server, datastream, and surfaces match so the same in-memory `ChatView` can keep serving this Concierge connection after dismiss.
     func hasSameChatServiceIdentity(as other: ConciergeConfiguration) -> Bool {
         guard ecid == other.ecid,

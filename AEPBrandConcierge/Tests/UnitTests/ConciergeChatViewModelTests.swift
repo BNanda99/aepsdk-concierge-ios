@@ -957,8 +957,8 @@ final class ChatControllerTests: XCTestCase {
         XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
     }
 
-    func test_sendFeedbackFor_withNilIdentityMap_emitsEmptyObject() {
-        // Given: identityMap unavailable
+    func test_sendFeedbackFor_withNilIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given
         let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: nil, surfaces: ["web://test"])
         let fakeService = MockChatService(configuration: configuration)
         let controller = makeController(configuration: configuration, service: fakeService)
@@ -969,7 +969,28 @@ final class ChatControllerTests: XCTestCase {
 
         let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
         let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
-        XCTAssertEqual(forwardedIdentityMap?.isEmpty, true)
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
+    }
+
+    func test_sendFeedbackFor_withUnserializableIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given: identityMap contains a value JSONSerialization can't encode (NaN)
+        let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: ["ECID": Double.nan], surfaces: ["web://test"])
+        let fakeService = MockChatService(configuration: configuration)
+        let controller = makeController(configuration: configuration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(messageId: messageId, with: FeedbackPayload(sentiment: .positive, selectedOptions: [], notes: ""))
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
     }
 
     // MARK: - Helpers

@@ -257,15 +257,60 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
     }
 
-    func test_createChatPayload_withNilIdentityMap_emitsEmptyObject() throws {
-        // Given: identityMap unavailable
-        let configuration = makeConfiguration(identityMap: nil)
+    func test_createChatPayload_withNilIdentityMap_fallsBackToEcidOnlyMap() throws {
+        // Given
+        let configuration = makeConfiguration(ecid: "test-ecid-12345", identityMap: nil)
         let service = ConciergeChatService(configuration: configuration)
 
         let payload = try extractPayloadDictionary(from: service, query: "Hello")
         let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
 
-        XCTAssertEqual(forwardedIdentityMap?.isEmpty, true)
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_identityMapPayload_withNilIdentityMapAndNilEcid_isEmpty() {
+        // createChatPayload's readiness gate would throw before reaching this branch;
+        // test the property directly since both call sites route through it.
+        let configuration = ConciergeConfiguration(ecid: nil, identityMap: nil, surfaces: ["web://test.adobe.com/surface"])
+
+        XCTAssertEqual(configuration.identityMapPayload.isEmpty, true)
+    }
+
+    // identityMap JSON-Safety Tests
+
+    func test_identityMapPayload_withUnserializableIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given: identityMap contains a value JSONSerialization can't encode (NaN)
+        let configuration = ConciergeConfiguration(ecid: "test-ecid-12345", identityMap: ["ECID": Double.nan], surfaces: ["web://test.adobe.com/surface"])
+
+        let identityMapPayload = configuration.identityMapPayload
+
+        let ecidEntries = identityMapPayload["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_identityMapPayload_withUnserializableIdentityMapAndNilEcid_isEmpty() {
+        // Given
+        let configuration = ConciergeConfiguration(ecid: nil, identityMap: ["ECID": Double.nan], surfaces: ["web://test.adobe.com/surface"])
+
+        XCTAssertEqual(configuration.identityMapPayload.isEmpty, true)
+    }
+
+    func test_createChatPayload_withUnserializableIdentityMap_stillSendsQueryAndEcid() throws {
+        // Given
+        let configuration = makeConfiguration(ecid: "test-ecid-12345", identityMap: ["ECID": Double.nan])
+        let service = ConciergeChatService(configuration: configuration)
+
+        // When
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let event = extractFirstEvent(from: payload)
+        let forwardedIdentityMap = extractXdmIdentityMap(from: event!)
+
+        // Then
+        XCTAssertNotNil(event?["query"], "the user's message must still be sent")
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
     }
 
     // MARK: - Error Cases
