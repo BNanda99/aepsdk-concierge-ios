@@ -63,12 +63,24 @@ public enum ConciergeConstants {
         static let SHOW_UI = "Show Brand Concierge UI - Request"
         static let SHOW_UI_RESPONSE = "Show Brand Concierge UI - Response"
         static let FEEDBACK = "Brand Concierge - Chat Feedback"
+        static let DATA_HANDOFF = "Concierge Data Handoff"
+        static let DATA_HANDOFF_RESPONSE = "Concierge Data Handoff Response"
     }
 
     internal enum EventData {
         enum Key {
             static let CONFIG = "config"
             static let SURFACES = "surfaces"
+        }
+    }
+
+    /// Keys for the data-handoff event, used internally by `Concierge.sendDataHandoff(...)` and
+    /// the extension's listener. Not public - consumer apps go through the wrapper function.
+    internal enum DataHandoffEventData {
+        enum Key {
+            static let PAYLOAD = "dataHandoffEvent"
+            static let ACCEPTED = "accepted"
+            static let REJECT_REASON = "rejectReason"
         }
     }
 
