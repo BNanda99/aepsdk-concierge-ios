@@ -163,15 +163,7 @@ More information regarding theme customization can be found in the [style-guide]
 
 ## Identities
 
-Brand Concierge forwards the full Edge Identity `identityMap` on every chat and feedback request. The ECID is always included automatically. To send additional identities (e.g. `hashedEmail`, `CRMID`, or a custom namespace), set them via the Edge Identity API — they are forwarded verbatim, so lowercasing/hashing is the app's responsibility:
-
-```swift
-import AEPEdgeIdentity
-
-let map = IdentityMap()
-map.add(item: IdentityItem(id: "<lowercased-sha256-email>", authenticatedState: .authenticated, primary: false), withNamespace: "hashedEmail")
-Identity.updateIdentities(with: map)
-```
+Brand Concierge forwards the full Edge Identity `identityMap` on every chat and feedback request. The ECID is always included automatically. To send additional identities (e.g. `hashedEmail`, `CRMID`, or a custom namespace), set them via the Edge Identity extension's [`updateIdentities` API](https://developer.adobe.com/client-sdks/edge/identity-for-edge-network/api-reference/#updateidentities) — they are forwarded verbatim, so lowercasing/hashing is the app's responsibility.
 
 Namespace priority and identity-graph rules are configured server-side in Adobe Experience Platform; the SDK does not interpret or relabel namespaces.
 
