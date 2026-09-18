@@ -76,6 +76,11 @@ final class BuyNowMockURLProtocol: URLProtocol {
                 "primary": [
                     "text": "Buy now",
                     "url": "demoapp://buy-now?title=Wireless%20Noise-Cancelling%20Headphones&price=%24249.99"
+                ],
+                // Secondary action → card renders both CTAs; the product below has none.
+                "secondary": [
+                    "text": "Learn more",
+                    "url": "https://shop.example.com/products/wireless-noise-cancelling-headphones"
                 ]
             ]
         ]
