@@ -26,11 +26,13 @@ final class ConciergeChatServiceTests: XCTestCase {
     private func makeConfiguration(
         consentCollectValue: String? = nil,
         ecid: String = "test-ecid-12345",
+        identityMap: [String: Any]? = nil,
         surfaces: [String] = ["web://test.adobe.com/surface"]
     ) -> ConciergeConfiguration {
         return ConciergeConfiguration(
             consentCollectValue: consentCollectValue,
             ecid: ecid,
+            identityMap: identityMap,
             surfaces: surfaces
         )
     }
@@ -205,7 +207,164 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertNotNil(event?["xdm"], "Event should contain 'xdm' object")
         XCTAssertNotNil(event?["meta"], "Event should contain 'meta' object")
     }
+
+    // MARK: - Extra XDM Fields (data handoff forwarding)
+
+    func test_createChatPayload_withExtraXDMFields_mergesAlongsideIdentityMap() throws {
+        // Given
+        let configuration = makeConfiguration(consentCollectValue: "y")
+        let service = ConciergeChatService(configuration: configuration)
+        let extraXDMFields: [String: Any] = ["commerce": ["order": ["purchaseID": "abc123"]]]
+
+        // When
+        let payloadData = try service.createChatPayload(query: "Test query", extraXDMFields: extraXDMFields)
+        let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
+        let xdm = extractFirstEvent(from: payload ?? [:])?["xdm"] as? [String: Any]
+
+        // Then
+        XCTAssertNotNil(xdm?["identityMap"], "identityMap should still be present alongside the merged fields")
+        let order = (xdm?["commerce"] as? [String: Any])?["order"] as? [String: Any]
+        XCTAssertEqual(order?["purchaseID"] as? String, "abc123")
+    }
+
+    func test_createChatPayload_withHandoffNull_serializesJsonNull() throws {
+        let service = ConciergeChatService(configuration: makeConfiguration())
+        let handoff = ConciergeXDMContextStore.merging(
+            ["commerce": ["order": ["purchaseID": NSNull()]]],
+            over: ["commerce": ["order": ["purchaseID": "old", "currency": "USD"]]]
+        )
+
+        let data = try service.createChatPayload(query: "checkout", extraXDMFields: handoff)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let xdm = try XCTUnwrap(extractFirstEvent(from: payload)?["xdm"] as? [String: Any])
+        let commerce = try XCTUnwrap(xdm["commerce"] as? [String: Any])
+        let order = try XCTUnwrap(commerce["order"] as? [String: Any])
+
+        XCTAssertTrue(order["purchaseID"] is NSNull)
+        XCTAssertEqual(order["currency"] as? String, "USD")
+    }
+
+    func test_createChatPayload_withExtraXDMFieldsContainingIdentityMap_doesNotOverwriteRealIdentityMap() throws {
+        // Given
+        let configuration = makeConfiguration(ecid: "real-ecid")
+        let service = ConciergeChatService(configuration: configuration)
+        let maliciousXDMFields: [String: Any] = ["identityMap": ["ECID": [["id": "attacker-ecid"]]]]
+
+        // When
+        let payloadData = try service.createChatPayload(query: "Test query", extraXDMFields: maliciousXDMFields)
+        let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
+        let identityMap = (extractFirstEvent(from: payload ?? [:])?["xdm"] as? [String: Any])?["identityMap"] as? [String: Any]
+        let ecidEntries = identityMap?["ECID"] as? [[String: Any]]
+
+        // Then - the SDK's own identityMap always wins on collision
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "real-ecid")
+    }
     
+    // identityMap Forwarding Tests
+
+    private func extractXdmIdentityMap(from event: [String: Any]) -> [String: Any]? {
+        guard let xdm = event["xdm"] as? [String: Any] else { return nil }
+        return xdm[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+    }
+
+    func test_createChatPayload_withFullIdentityMap_forwardsAllNamespacesVerbatim() throws {
+        // Given
+        let identityMap: [String: Any] = [
+            "ECID": [["id": "test-ecid-12345", "authenticatedState": "ambiguous", "primary": false]],
+            "hashedEmail": [["id": "hashed-email-value", "authenticatedState": "authenticated", "primary": true]],
+            "CRMID": [["id": "crm-id-value"]]
+        ]
+        let configuration = makeConfiguration(identityMap: identityMap)
+        let service = ConciergeChatService(configuration: configuration)
+
+        // When
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+        XCTAssertEqual(ecidEntries?.first?["authenticatedState"] as? String, "ambiguous")
+        XCTAssertEqual(ecidEntries?.first?["primary"] as? Bool, false)
+
+        let hashedEmailEntries = forwardedIdentityMap?["hashedEmail"] as? [[String: Any]]
+        XCTAssertEqual(hashedEmailEntries?.first?["id"] as? String, "hashed-email-value")
+        XCTAssertEqual(hashedEmailEntries?.first?["authenticatedState"] as? String, "authenticated")
+        XCTAssertEqual(hashedEmailEntries?.first?["primary"] as? Bool, true)
+
+        let crmEntries = forwardedIdentityMap?["CRMID"] as? [[String: Any]]
+        XCTAssertEqual(crmEntries?.first?["id"] as? String, "crm-id-value")
+    }
+
+    func test_createChatPayload_withEcidOnlyIdentityMap_stillForwardsEcid() throws {
+        // Regression: ECID-only identityMap (as before this change) still reaches the endpoint
+        let identityMap: [String: Any] = ["ECID": [["id": "test-ecid-12345"]]]
+        let configuration = makeConfiguration(identityMap: identityMap)
+        let service = ConciergeChatService(configuration: configuration)
+
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_createChatPayload_withNilIdentityMap_fallsBackToEcidOnlyMap() throws {
+        // Given
+        let configuration = makeConfiguration(ecid: "test-ecid-12345", identityMap: nil)
+        let service = ConciergeChatService(configuration: configuration)
+
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let forwardedIdentityMap = extractXdmIdentityMap(from: extractFirstEvent(from: payload)!)
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_identityMapPayload_withNilIdentityMapAndNilEcid_isEmpty() {
+        // createChatPayload's readiness gate would throw before reaching this branch;
+        // test the property directly since both call sites route through it.
+        let configuration = ConciergeConfiguration(ecid: nil, identityMap: nil, surfaces: ["web://test.adobe.com/surface"])
+
+        XCTAssertEqual(configuration.identityMapPayload.isEmpty, true)
+    }
+
+    // identityMap JSON-Safety Tests
+
+    func test_identityMapPayload_withUnserializableIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given: identityMap contains a value JSONSerialization can't encode (NaN)
+        let configuration = ConciergeConfiguration(ecid: "test-ecid-12345", identityMap: ["ECID": Double.nan], surfaces: ["web://test.adobe.com/surface"])
+
+        let identityMapPayload = configuration.identityMapPayload
+
+        let ecidEntries = identityMapPayload["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
+    func test_identityMapPayload_withUnserializableIdentityMapAndNilEcid_isEmpty() {
+        // Given
+        let configuration = ConciergeConfiguration(ecid: nil, identityMap: ["ECID": Double.nan], surfaces: ["web://test.adobe.com/surface"])
+
+        XCTAssertEqual(configuration.identityMapPayload.isEmpty, true)
+    }
+
+    func test_createChatPayload_withUnserializableIdentityMap_stillSendsQueryAndEcid() throws {
+        // Given
+        let configuration = makeConfiguration(ecid: "test-ecid-12345", identityMap: ["ECID": Double.nan])
+        let service = ConciergeChatService(configuration: configuration)
+
+        // When
+        let payload = try extractPayloadDictionary(from: service, query: "Hello")
+        let event = extractFirstEvent(from: payload)
+        let forwardedIdentityMap = extractXdmIdentityMap(from: event!)
+
+        // Then
+        XCTAssertNotNil(event?["query"], "the user's message must still be sent")
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "test-ecid-12345")
+    }
+
     // MARK: - Error Cases
     
     func test_createChatPayload_withNilEcid_throwsInvalidEcidError() {
@@ -415,6 +574,15 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertEqual(url.scheme, "https")
         let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
         XCTAssertEqual(queryItems?.first(where: { $0.name == "configId" })?.value, "ds-123")
+    }
+
+    func test_createUrl_usesResolvedSessionIDForTheTurn() throws {
+        let service = ConciergeChatService(configuration: makeConfigurationForUrl())
+
+        let url = try service.createUrl(sessionID: "resolved-session-id")
+
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(queryItems?.first(where: { $0.name == "sessionId" })?.value, "resolved-session-id")
     }
 
     func test_createUrl_withNilServer_throwsInvalidEndpointError() {
@@ -743,6 +911,56 @@ final class ConciergeChatServiceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(StubURLProtocol.count, 1, "the request was issued; a network error is handled quietly")
     }
 
+    @MainActor
+    func test_identityReset_cancelsAllFeedbackRequests_withoutActiveChatTurn() async {
+        StubURLProtocol.reset()
+        StubURLProtocol.shouldHold = true
+        let service = makeStubbedService()
+        let controller = ChatController(configuration: nil, chatService: service, speechCapturer: nil, speaker: nil)
+        let feedback: [String: Any] = ["xdm": ["conversation": ["turnID": "old-turn"]]]
+
+        service.sendFeedback(data: feedback, token: nil)
+        service.sendFeedback(data: feedback, token: nil)
+        await waitForCondition(timeout: 3) { StubURLProtocol.count == 2 }
+        XCTAssertEqual(StubURLProtocol.count, 2)
+        XCTAssertFalse(controller.isProcessing)
+
+        controller.endConversationForIdentityReset()
+        await waitForCondition(timeout: 3) { StubURLProtocol.stoppedCount == 2 }
+        XCTAssertEqual(StubURLProtocol.stoppedCount, 2, "Reset must cancel every feedback request even without a chat turn.")
+        controller.endConversationForIdentityReset()
+        XCTAssertEqual(StubURLProtocol.stoppedCount, 2)
+    }
+
+    @MainActor
+    func test_identityReset_releasesTransportDelegate_withoutStartingRequest() async {
+        weak var releasedService: ConciergeChatService?
+        autoreleasepool {
+            let service = makeStubbedService()
+            releasedService = service
+            let controller = ChatController(configuration: nil, chatService: service, speechCapturer: nil, speaker: nil)
+            controller.endConversationForIdentityReset()
+        }
+        await waitForCondition(timeout: 3) { releasedService == nil }
+        XCTAssertNil(releasedService, "Discarded prepared services must not be retained by an idle URLSession.")
+    }
+
+    @MainActor
+    func test_identityReset_rejectsFeedbackOnEndedService_butNewServiceCanSend() async {
+        StubURLProtocol.reset()
+        let service = makeStubbedService()
+        let controller = ChatController(configuration: nil, chatService: service, speechCapturer: nil, speaker: nil)
+        controller.endConversationForIdentityReset()
+
+        service.sendFeedback(data: ["xdm": ["conversation": ["turnID": "old-turn"]]], token: nil)
+        let freshService = makeStubbedService()
+        freshService.sendFeedback(data: ["xdm": ["conversation": ["turnID": "new-turn"]]], token: nil)
+        await waitForCondition(timeout: 3) { StubURLProtocol.count >= 1 }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(StubURLProtocol.count, 1, "Only the replacement conversation may submit feedback.")
+    }
+
     func test_streamChat_withUnbuildableURL_completesWithError() async {
         // makeConfiguration() has no server, so createUrl() throws — exercising streamChat's catch.
         let service = ConciergeChatService(configuration: makeConfiguration())
@@ -807,13 +1025,28 @@ private final class StubURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var requests: [URLRequest] = []
     private static var _shouldFail = false
+    private static var _shouldHold = false
+    private static var _stoppedCount = 0
+    private var held = false
 
-    static func reset() { lock.lock(); requests = []; _shouldFail = false; lock.unlock() }
+    static func reset() {
+        lock.lock()
+        requests = []
+        _shouldFail = false
+        _shouldHold = false
+        _stoppedCount = 0
+        lock.unlock()
+    }
     static var count: Int { lock.lock(); defer { lock.unlock() }; return requests.count }
     static var last: URLRequest? { lock.lock(); defer { lock.unlock() }; return requests.last }
+    static var stoppedCount: Int { lock.lock(); defer { lock.unlock() }; return _stoppedCount }
     static var shouldFail: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _shouldFail }
         set { lock.lock(); defer { lock.unlock() }; _shouldFail = newValue }
+    }
+    static var shouldHold: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _shouldHold }
+        set { lock.lock(); defer { lock.unlock() }; _shouldHold = newValue }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -823,8 +1056,10 @@ private final class StubURLProtocol: URLProtocol {
         StubURLProtocol.lock.lock()
         StubURLProtocol.requests.append(request)
         let shouldFail = StubURLProtocol._shouldFail
+        held = StubURLProtocol._shouldHold
         StubURLProtocol.lock.unlock()
 
+        if held { return }
         if shouldFail {
             client?.urlProtocol(self, didFailWithError: NSError(domain: "StubURLProtocol", code: -1))
             return
@@ -837,7 +1072,14 @@ private final class StubURLProtocol: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        StubURLProtocol.lock.lock()
+        if held {
+            StubURLProtocol._stoppedCount += 1
+            held = false
+        }
+        StubURLProtocol.lock.unlock()
+    }
 }
 
 /// Thread-safe box for capturing a callback value from a background task in a test.

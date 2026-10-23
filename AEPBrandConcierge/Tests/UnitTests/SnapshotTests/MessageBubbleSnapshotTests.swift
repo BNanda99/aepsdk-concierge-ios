@@ -120,6 +120,16 @@ final class MessageBubbleSnapshotTests: XCTestCase {
         assertSnapshot(of: view, as: .image(layout: .fixed(width: 390, height: 120)))
     }
 
+    /// A `.productDetail` card with both a primary (filled) and secondary (outlined) CTA, rendered
+    /// side by side — the multi-CTA behavior driven by `entity_info.primary` + `entity_info.secondary`.
+    func test_productDetailCard_primaryAndSecondaryCtas() {
+        var probeTheme = ConciergeThemeLoader.default()
+        probeTheme.behavior.productCard = ConciergeProductCardBehavior(cardStyle: .productDetail, cardsAlignment: .center)
+
+        let view = ProductDetailCtaProbeHost(theme: probeTheme)
+        assertSnapshot(of: view, as: .image(layout: .fixed(width: 390, height: 420)))
+    }
+
     func test_productCard_cardsAlignmentEnd() {
         var probeTheme = ConciergeThemeLoader.default()
         probeTheme.behavior.productCard = ConciergeProductCardBehavior(cardsAlignment: .end)
@@ -133,6 +143,13 @@ final class MessageBubbleSnapshotTests: XCTestCase {
     func test_responsePlaceholder_defaultAppearance() {
         let view = ResponsePlaceholderProbeHost(theme: ConciergeThemeLoader.default())
         assertSnapshot(of: view, as: .image(layout: .fixed(width: 390, height: 80)))
+    }
+
+    // MARK: - Paragraph Spacing Tests
+
+    func test_agentMessage_multiParagraph_blockSpacingMatchesLineHeight() {
+        let view = MultiParagraphMessageProbeHost(theme: ConciergeThemeLoader.default())
+        assertSnapshot(of: view, as: .image(layout: .fixed(width: 390, height: 260)))
     }
 }
 
@@ -262,6 +279,33 @@ private struct ProductCardAlignmentProbeHost: View {
     }
 }
 
+/// Probe for the `.productDetail` product card rendering both a primary and a secondary CTA.
+private struct ProductDetailCtaProbeHost: View {
+    let theme: ConciergeTheme
+
+    private static let cardData = ProductCardData(
+        imageSource: .remote(nil),
+        title: "Trail Runner Jacket",
+        subtitle: "Lightweight, water-resistant shell",
+        price: "$129.00",
+        wasPrice: nil,
+        badge: "New",
+        destinationURL: nil,
+        primaryButton: ActionButton(text: "Buy now", url: "myapp://checkout?productId=prod-123"),
+        secondaryButton: ActionButton(text: "Learn more", url: "https://shop.com/products/prod-123"),
+        imageWidth: nil,
+        imageHeight: nil
+    )
+
+    var body: some View {
+        ChatMessageView(template: .productCard(Self.cardData))
+            .padding(.horizontal, 16)
+            .frame(width: 390, height: 420, alignment: .top)
+            .background(Color.white)
+            .conciergeTheme(theme)
+    }
+}
+
 /// Probe for ConciergeResponsePlaceholderView default appearance.
 private struct ResponsePlaceholderProbeHost: View {
     let theme: ConciergeTheme
@@ -273,6 +317,26 @@ private struct ResponsePlaceholderProbeHost: View {
         }
         .padding(16)
         .frame(width: 390, height: 80, alignment: .top)
+        .background(Color.white)
+        .conciergeTheme(theme)
+    }
+}
+
+/// Probe for markdown block spacing: an agent message with several paragraphs (e.g. store info).
+/// The gap between paragraphs should read as one blank line of body text.
+private struct MultiParagraphMessageProbeHost: View {
+    let theme: ConciergeTheme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ChatMessageView(
+                template: .basic(isUserMessage: false),
+                messageBody: "Downtown Store\n\n123 Main Street, Springfield\n\nOpen today 9 AM - 9 PM"
+            )
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(width: 390, height: 260, alignment: .top)
         .background(Color.white)
         .conciergeTheme(theme)
     }

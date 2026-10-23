@@ -47,6 +47,8 @@ public struct ConciergeLayout: Codable {
     public var messageBorderRadius: CGFloat
     public var messagePadding: ConciergePadding
     public var messageMaxWidth: CGFloat? // nil = no max width, value = max width in points
+    /// Vertical spacing between top-level Markdown blocks. `nil` uses the view's built-in fallback.
+    public var markdownBlockSpacing: CGFloat?
     public var chatInterfaceMaxWidth: CGFloat
     public var chatHistoryPadding: CGFloat
     public var chatHistoryPaddingTopExpanded: CGFloat
@@ -89,6 +91,9 @@ public struct ConciergeLayout: Codable {
     public var productCardWidth: CGFloat
     public var productCardMinHeight: CGFloat
     public var productCardMaxHeight: CGFloat
+    /// Maximum number of lines the product card description renders before truncating with an
+    /// ellipsis. `nil` means unset, and the card falls back to its built-in default of 2 lines.
+    public var productCardDescriptionMaxLines: Int?
     public var productImageWidth: CGFloat
     public var productImageHeight: CGFloat
     public var productImageScale: ProductImageScale
@@ -109,6 +114,8 @@ public struct ConciergeLayout: Codable {
     public var productCardCtaButtonVerticalPadding: CGFloat
     public var productCardCtaButtonFontSize: CGFloat
     public var productCardCtaButtonFontWeight: CodableFontWeight
+    /// Outline width for the secondary product card CTA (shares radius/padding/font with the primary).
+    public var productCardSecondaryCtaButtonBorderWidth: CGFloat
     public var ctaButtonBorderRadius: CGFloat
     public var ctaButtonHorizontalPadding: CGFloat
     public var ctaButtonVerticalPadding: CGFloat
@@ -154,6 +161,7 @@ public struct ConciergeLayout: Codable {
         messageBorderRadius: CGFloat = 10,
         messagePadding: ConciergePadding = ConciergePadding(vertical: 8, horizontal: 16),
         messageMaxWidth: CGFloat? = nil,
+        markdownBlockSpacing: CGFloat? = nil,
         chatInterfaceMaxWidth: CGFloat = 768,
         chatHistoryPadding: CGFloat = 16,
         // Keep defaults aligned with the current message list layout.
@@ -203,6 +211,7 @@ public struct ConciergeLayout: Codable {
         productCardWidth: CGFloat = 250,
         productCardMinHeight: CGFloat = 240,
         productCardMaxHeight: CGFloat = 360,
+        productCardDescriptionMaxLines: Int? = nil,
         productImageWidth: CGFloat = 190,
         productImageHeight: CGFloat = 190,
         productImageScale: ProductImageScale = .fill,
@@ -220,6 +229,7 @@ public struct ConciergeLayout: Codable {
         productCardCtaButtonVerticalPadding: CGFloat = 8,
         productCardCtaButtonFontSize: CGFloat = 12,
         productCardCtaButtonFontWeight: CodableFontWeight = .semibold,
+        productCardSecondaryCtaButtonBorderWidth: CGFloat = 1,
         ctaButtonBorderRadius: CGFloat = 99,
         ctaButtonHorizontalPadding: CGFloat = 16,
         ctaButtonVerticalPadding: CGFloat = 12,
@@ -256,6 +266,7 @@ public struct ConciergeLayout: Codable {
         self.messageBorderRadius = messageBorderRadius
         self.messagePadding = messagePadding
         self.messageMaxWidth = messageMaxWidth
+        self.markdownBlockSpacing = markdownBlockSpacing
         self.chatInterfaceMaxWidth = chatInterfaceMaxWidth
         self.chatHistoryPadding = chatHistoryPadding
         self.chatHistoryPaddingTopExpanded = chatHistoryPaddingTopExpanded
@@ -296,6 +307,7 @@ public struct ConciergeLayout: Codable {
         self.productCardWidth = productCardWidth
         self.productCardMinHeight = productCardMinHeight
         self.productCardMaxHeight = productCardMaxHeight
+        self.productCardDescriptionMaxLines = productCardDescriptionMaxLines
         self.productImageWidth = productImageWidth
         self.productImageHeight = productImageHeight
         self.productImageScale = productImageScale
@@ -313,6 +325,7 @@ public struct ConciergeLayout: Codable {
         self.productCardCtaButtonVerticalPadding = productCardCtaButtonVerticalPadding
         self.productCardCtaButtonFontSize = productCardCtaButtonFontSize
         self.productCardCtaButtonFontWeight = productCardCtaButtonFontWeight
+        self.productCardSecondaryCtaButtonBorderWidth = productCardSecondaryCtaButtonBorderWidth
         self.ctaButtonBorderRadius = ctaButtonBorderRadius
         self.ctaButtonHorizontalPadding = ctaButtonHorizontalPadding
         self.ctaButtonVerticalPadding = ctaButtonVerticalPadding

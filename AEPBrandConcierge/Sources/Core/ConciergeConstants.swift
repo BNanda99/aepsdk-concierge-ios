@@ -20,9 +20,10 @@ import Foundation
 public enum ConciergeConstants {
     static let LOG_TAG = "Concierge"
     static let EXTENSION_NAME = "com.adobe.aep.concierge"
-    static let EXTENSION_VERSION = "5.8.1"
+    static let EXTENSION_VERSION = "5.10.1"
     static let FRIENDLY_NAME = "Brand Concierge"
     static let DEFAULT_TIMEOUT = 3.0
+    static let IDENTITY_RESET_WARNING_DELAY_NANOSECONDS: UInt64 = 5_000_000_000
 
     // MARK: - HTTP
 
@@ -63,12 +64,25 @@ public enum ConciergeConstants {
         static let SHOW_UI = "Show Brand Concierge UI - Request"
         static let SHOW_UI_RESPONSE = "Show Brand Concierge UI - Response"
         static let FEEDBACK = "Brand Concierge - Chat Feedback"
+        static let DATA_HANDOFF = "Concierge Data Handoff"
+        static let DATA_HANDOFF_RESPONSE = "Concierge Data Handoff Response"
     }
 
     internal enum EventData {
         enum Key {
             static let CONFIG = "config"
             static let SURFACES = "surfaces"
+        }
+    }
+
+    /// Keys for the data-handoff event, used internally by `Concierge.sendDataHandoff(...)` and
+    /// the extension's listener. Not public - consumer apps go through the wrapper function.
+    internal enum DataHandoffEventData {
+        enum Key {
+            static let PAYLOAD = "dataHandoffEvent"
+            static let ACCEPTED = "accepted"
+            static let ERROR_CODE = "errorCode"
+            static let ERROR_MESSAGE = "errorMessage"
         }
     }
 
@@ -89,6 +103,40 @@ public enum ConciergeConstants {
     internal enum Request {
         static let READ_TIMEOUT = 15.0
         static let HTTPS = "https://"
+
+        /// How long a handoff turn may go without producing *any* response before it's abandoned.
+        ///
+        /// Catches the common hang - a backend that never answers - and fails fast, since there's
+        /// nothing to lose by cancelling a turn that has produced nothing. Disarmed by
+        /// `ChatController` on the first chunk.
+        ///
+        /// Kept below `READ_TIMEOUT` on purpose: a handoff is triggered from app UI (a checkout
+        /// screen), where a prompt failure the app can act on beats a long silent wait.
+        static let DATA_HANDOFF_FIRST_CHUNK_TIMEOUT = 10.0
+
+        /// Hard ceiling on a single data handoff turn, enforced by `ChatController`.
+        ///
+        /// `READ_TIMEOUT` can't serve this purpose: it's `URLRequest.timeoutInterval`, an
+        /// *inactivity* timeout, so a turn that keeps chunking steadily runs indefinitely without
+        /// tripping it. This is what makes `sendDataHandoff`'s completion a promise.
+        ///
+        /// Deliberately generous. Once a turn is streaming, cancelling it throws away a reply the
+        /// user was about to see, so this only exists to bound the callback - the fast failure
+        /// case is already covered by `DATA_HANDOFF_FIRST_CHUNK_TIMEOUT`.
+        static let DATA_HANDOFF_TURN_TIMEOUT = 60.0
+
+        /// Slack between the controller's cap and the event hub's timer, so the controller always
+        /// wins the race. Covers the main-actor hop and dispatching the response event.
+        static let DATA_HANDOFF_TIMEOUT_MARGIN = 5.0
+
+        /// Budget for the data handoff response event.
+        ///
+        /// Strictly greater than `DATA_HANDOFF_TURN_TIMEOUT` so the controller reports the real
+        /// outcome first. The hub's own `.noResponse` is then a genuine "the extension never
+        /// answered" fallback rather than the routine result for a slow turn.
+        static var dataHandoffResponseTimeout: TimeInterval {
+            DATA_HANDOFF_TURN_TIMEOUT + DATA_HANDOFF_TIMEOUT_MARGIN
+        }
 
         enum EventType {
             static let CONVERSATION_FEEDBACK = "conversation.feedback"
@@ -210,6 +258,7 @@ public enum ConciergeConstants {
             static let SESSION_INITIALIZED = "Brand Concierge Session Initialized"
             static let CHAT_OPENED = "Brand Concierge Chat Opened"
             static let CHAT_CLOSED = "Brand Concierge Chat Closed"
+            static let CONVERSATION_ENDED = "Brand Concierge Conversation Ended"
             static let QUERY_SUBMITTED = "Brand Concierge Query Submitted"
             static let PROMPT_SUGGESTION_CLICKED = "Brand Concierge Prompt Suggestion Clicked"
             static let WELCOME_PROMPT_SUGGESTION_CLICKED = "Brand Concierge Welcome Prompt Suggestion Clicked"
@@ -229,6 +278,7 @@ public enum ConciergeConstants {
             public static let SESSION_INITIALIZED = "concierge:session:initialized"
             public static let CHAT_OPENED = "concierge:chat:opened"
             public static let CHAT_CLOSED = "concierge:chat:closed"
+            public static let CONVERSATION_ENDED = "concierge:conversation:ended"
             public static let QUERY_SUBMITTED = "concierge:query:submitted"
             public static let PROMPT_SUGGESTION_CLICKED = "concierge:promptSuggestion:clicked"
             public static let WELCOME_PROMPT_SUGGESTION_CLICKED = "concierge:welcomePromptSuggestion:clicked"
@@ -248,6 +298,9 @@ public enum ConciergeConstants {
             public enum Key {
                 public static let EVENT_TYPE = "conciergeEventType"
                 public static let EPOCH_TIME = "epochTime"
+                static let REASON = "reason"
+                static let SESSION_ID = "sessionId"
+                static let HAD_ACTIVE_TURN = "hadActiveTurn"
                 public static let DURATION_MILLIS = "durationMillis"
                 public static let QUERY = "query"
                 public static let SUGGESTION = "suggestion"
@@ -263,6 +316,7 @@ public enum ConciergeConstants {
                 public static let ERROR_MESSAGE = "errorMessage"
                 public static let LABEL = "label"
                 public static let ORIGIN = "origin"
+                public static let XDM_FIELDS = "xdmFields"
             }
         }
 

@@ -1,7 +1,7 @@
 {
   "images" : [
     {
-      "filename" : "S2_Icon_ClockPending_20_N.svg",
+      "filename" : "arrow-open-in-new.svg",
       "idiom" : "universal",
       "scale" : "1x"
     },
@@ -17,5 +17,9 @@
   "info" : {
     "author" : "xcode",
     "version" : 1
+  },
+  "properties" : {
+    "preserves-vector-representation" : true,
+    "template-rendering-intent" : "template"
   }
 }

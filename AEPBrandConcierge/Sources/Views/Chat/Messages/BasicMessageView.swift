@@ -73,6 +73,19 @@ struct BasicMessageView: View {
         return max(0, targetLineHeight - baseFont.lineHeight)
     }
 
+    /// Vertical gap between markdown blocks (paragraphs, lists, etc.). Equal to one rendered line of
+    /// message text so a paragraph break reads as a blank line, matching Android and web.
+    private var messageBlockSpacing: CGFloat {
+        Self.markdownBlockSpacing(font: resolvedAgentFont, lineHeightMultiplier: theme.typography.lineHeight)
+    }
+
+    /// One rendered line of text for `font` under the theme's line-height multiplier: the larger of the
+    /// font's natural line height and `pointSize * lineHeightMultiplier`.
+    static func markdownBlockSpacing(font: UIFont, lineHeightMultiplier: CGFloat) -> CGFloat {
+        guard lineHeightMultiplier.isFinite, lineHeightMultiplier > 0 else { return font.lineHeight }
+        return max(font.lineHeight, font.pointSize * lineHeightMultiplier)
+    }
+
     /// Builds a link icon resolver closure from the message's `linkHints` and the theme's
     /// `citations` icon config.
     private var resolvedLinkIconResolver: ((URL) -> (assetName: String, sfSymbol: String, image: UIImage?))? {
@@ -144,9 +157,7 @@ struct BasicMessageView: View {
         VStack(alignment: .leading, spacing: 0) {
             messageContent(annotatedBody: annotatedBody, markers: markers)
                 .lineSpacing(messageLineSpacing)
-                .padding(showAgentIcon
-                    ? EdgeInsets(top: theme.layout.messagePadding.top, leading: 0, bottom: theme.layout.messagePadding.bottom, trailing: 0)
-                    : theme.layout.messagePadding.edgeInsets)
+                .padding(theme.layout.messagePadding.edgeInsets)
                 .frame(maxWidth: resolvedMessageMaxWidth, alignment: .leading)
                 .textSelection(.enabled)
                 .foregroundColor(isUserMessage ? theme.colors.message.userText.color : theme.colors.message.conciergeText.color)
@@ -188,10 +199,10 @@ struct BasicMessageView: View {
             MarkdownBlockView(
                 markdown: annotatedBody,
                 textColor: UIColor(theme.colors.message.conciergeText.color),
-                // Inline link text is colored with `--color-primary`; the link *icon* below
-                // intentionally falls back to `--message-concierge-link-color`, so if a theme sets
-                // those two tokens to different values, a link's text and its icon can differ.
-                linkColor: UIColor(theme.colors.primary.primary.color),
+                // Inline link text and the link *icon* below both default to
+                // `--message-concierge-link-color`, themeable independently of `--color-primary`.
+                // The icon can still diverge when `citations.linkIconStyle.color` overrides it.
+                linkColor: UIColor(theme.colors.message.conciergeLink.color),
                 baseFont: resolvedAgentFont,
                 citationMarkers: markers,
                 citationStyle: .init(
