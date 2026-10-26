@@ -37,6 +37,10 @@ struct BasicMessageView: View {
         !isUserMessage && theme.hasAgentIcon
     }
 
+    private var bubblePadding: EdgeInsets {
+        theme.layout.resolvedMessagePadding(isUserMessage: isUserMessage, hasAgentIcon: theme.hasAgentIcon).edgeInsets
+    }
+
     private var resolvedAgentFont: UIFont {
         let fontSize = theme.typography.fontSize
         if theme.typography.fontFamily.isEmpty {
@@ -71,6 +75,19 @@ struct BasicMessageView: View {
 
         let targetLineHeight = fontSize * multiplier
         return max(0, targetLineHeight - baseFont.lineHeight)
+    }
+
+    /// Vertical gap between markdown blocks (paragraphs, lists, etc.). Equal to one rendered line of
+    /// message text so a paragraph break reads as a blank line, matching Android and web.
+    private var messageBlockSpacing: CGFloat {
+        Self.markdownBlockSpacing(font: resolvedAgentFont, lineHeightMultiplier: theme.typography.lineHeight)
+    }
+
+    /// One rendered line of text for `font` under the theme's line-height multiplier: the larger of the
+    /// font's natural line height and `pointSize * lineHeightMultiplier`.
+    static func markdownBlockSpacing(font: UIFont, lineHeightMultiplier: CGFloat) -> CGFloat {
+        guard lineHeightMultiplier.isFinite, lineHeightMultiplier > 0 else { return font.lineHeight }
+        return max(font.lineHeight, font.pointSize * lineHeightMultiplier)
     }
 
     /// Builds a link icon resolver closure from the message's `linkHints` and the theme's
@@ -114,7 +131,9 @@ struct BasicMessageView: View {
                 if isUserMessage { Spacer() } else if theme.behavior.chat.messageAlignment == .center { Spacer() }
 
                 if showAgentIcon {
+                    // Fixed frame reserves the icon column even if the asset fails to resolve.
                     LocalAssetImageView(iconPath: theme.assets.icons.company, width: theme.layout.agentIconSize, height: theme.layout.agentIconSize)
+                        .frame(width: theme.layout.agentIconSize, height: theme.layout.agentIconSize)
                         .padding(.trailing, theme.layout.agentIconSpacing)
                 }
 
@@ -144,9 +163,7 @@ struct BasicMessageView: View {
         VStack(alignment: .leading, spacing: 0) {
             messageContent(annotatedBody: annotatedBody, markers: markers)
                 .lineSpacing(messageLineSpacing)
-                .padding(showAgentIcon
-                    ? EdgeInsets(top: theme.layout.messagePadding.top, leading: 0, bottom: theme.layout.messagePadding.bottom, trailing: 0)
-                    : theme.layout.messagePadding.edgeInsets)
+                .padding(bubblePadding)
                 .frame(maxWidth: resolvedMessageMaxWidth, alignment: .leading)
                 .textSelection(.enabled)
                 .foregroundColor(isUserMessage ? theme.colors.message.userText.color : theme.colors.message.conciergeText.color)
@@ -188,10 +205,10 @@ struct BasicMessageView: View {
             MarkdownBlockView(
                 markdown: annotatedBody,
                 textColor: UIColor(theme.colors.message.conciergeText.color),
-                // Inline link text is colored with `--color-primary`; the link *icon* below
-                // intentionally falls back to `--message-concierge-link-color`, so if a theme sets
-                // those two tokens to different values, a link's text and its icon can differ.
-                linkColor: UIColor(theme.colors.primary.primary.color),
+                // Inline link text and the link *icon* below both default to
+                // `--message-concierge-link-color`, themeable independently of `--color-primary`.
+                // The icon can still diverge when `citations.linkIconStyle.color` overrides it.
+                linkColor: UIColor(theme.colors.message.conciergeLink.color),
                 baseFont: resolvedAgentFont,
                 citationMarkers: markers,
                 citationStyle: .init(

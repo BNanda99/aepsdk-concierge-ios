@@ -40,6 +40,9 @@ class ConciergeChatService: NSObject {
     private var dataTask: URLSessionDataTask?
     private var onChunkHandler: ((ConversationPayload) -> Void)?
     private var onCompleteHandler: ((ConciergeError?) -> Void)?
+    private let feedbackLock = NSLock()
+    private var feedbackTasks: [UUID: URLSessionDataTask] = [:]
+    private var feedbackEndedForIdentityReset = false
 
     // MARK: - Initialization
 
@@ -55,18 +58,20 @@ class ConciergeChatService: NSObject {
     // MARK: - Streaming Chat / Queries
 
     /// Builds and sends the streaming request. `token` is resolved by the caller (off the UI thread)
-    /// and attached to the request body; pass `nil` to send the turn without one.
-    func streamChat(_ query: String, token: String?,
+    /// and attached to the request body; pass `nil` to send the turn without one. `extraXDMFields`,
+    /// if provided, is merged into the request's `xdm` object alongside `identityMap`.
+    func streamChat(_ query: String, token: String?, extraXDMFields: [String: Any]? = nil,
+                    sessionID: String? = nil,
                     onChunk: @escaping (ConversationPayload) -> Void,
                     onComplete: @escaping (ConciergeError?) -> Void) {
         do {
-            let url = try createUrl()
+            let url = try createUrl(sessionID: sessionID)
 
             // Register handlers for this streaming session
             onChunkHandler = onChunk
             onCompleteHandler = onComplete
 
-            let payload = try createChatPayload(query: query, token: token)
+            let payload = try createChatPayload(query: query, token: token, extraXDMFields: extraXDMFields)
 
             var request = URLRequest(url: url)
             request.httpMethod = ConciergeConstants.HTTPMethods.POST
@@ -84,6 +89,12 @@ class ConciergeChatService: NSObject {
 
             dataTask?.resume()
         } catch {
+            // The handlers were already registered above, and this instance may still own a live
+            // `dataTask` from a prior turn. Clearing them stops that task's delegate callback from
+            // firing this same `onComplete` a second time.
+            onChunkHandler = nil
+            onCompleteHandler = nil
+
             let conciergeError = (error as? ConciergeError) ?? .unknown
             Log.warning(label: LOG_TAG, conciergeError.localizedDescription)
             onComplete(conciergeError)
@@ -95,6 +106,12 @@ class ConciergeChatService: NSObject {
     /// Builds and sends a feedback request. `token` is resolved by the caller and attached to the
     /// request body; pass `nil` to send without one.
     func sendFeedback(data: [String: Any], token: String?) {
+        feedbackLock.lock()
+        defer { feedbackLock.unlock() }
+        guard !feedbackEndedForIdentityReset else {
+            Log.warning(label: LOG_TAG, "Feedback rejected because identity reset ended the conversation.")
+            return
+        }
         do {
             let url = try createUrl()
             let payload = try createFeedbackPayload(data: data, token: token)
@@ -111,7 +128,11 @@ class ConciergeChatService: NSObject {
             // Refresh session activity timestamp when sending feedback
             SessionManager.shared.refreshSessionActivity()
 
-            session.dataTask(with: request) { _, response, error in
+            let feedbackID = UUID()
+            let task = session.dataTask(with: request) { _, response, error in
+                self.feedbackLock.lock()
+                self.feedbackTasks.removeValue(forKey: feedbackID)
+                self.feedbackLock.unlock()
                 if let error = error {
                     Log.warning(label: self.LOG_TAG, error.localizedDescription)
                     return
@@ -120,7 +141,9 @@ class ConciergeChatService: NSObject {
                 if let httpResponse = response as? HTTPURLResponse {
                     Log.debug(label: self.LOG_TAG, "Feedback request completed with statusCode=\(httpResponse.statusCode)")
                 }
-            }.resume()
+            }
+            feedbackTasks[feedbackID] = task
+            task.resume()
         } catch {
             let conciergeError = (error as? ConciergeError) ?? .unknown
             Log.warning(label: LOG_TAG, conciergeError.localizedDescription)
@@ -131,7 +154,7 @@ class ConciergeChatService: NSObject {
 
     /// Creates the URL for a request to the Concierge Service.
     /// - Note: Internal visibility for testing
-    func createUrl() throws -> URL {
+    func createUrl(sessionID: String? = nil) throws -> URL {
         // TODO: Remove prior to release
         if USE_TEMPS {
             return URL(string: TEMP_serviceEndpoint)!
@@ -149,9 +172,7 @@ class ConciergeChatService: NSObject {
             URLQueryItem(name: ConciergeConstants.Request.Keys.CONFIG_ID, value: datastream)
         ]
 
-        if let sessionId = configuration.sessionId {
-            queryItems.append(URLQueryItem(name: ConciergeConstants.Request.Keys.SESSION_ID, value: sessionId))
-        }
+        queryItems.append(URLQueryItem(name: ConciergeConstants.Request.Keys.SESSION_ID, value: sessionID ?? configuration.sessionId))
 
         if let conversationId = configuration.conversationId {
             queryItems.append(URLQueryItem(name: ConciergeConstants.Request.Keys.CONVERSATION_ID, value: conversationId))
@@ -172,17 +193,31 @@ class ConciergeChatService: NSObject {
         return url
     }
 
+    /// Resolves the backend session ID once so the context snapshot and request URL use the
+    /// same session even if the persisted session expires while a turn is being prepared.
+    func resolveSessionID() -> String {
+        configuration.sessionId
+    }
+
     /// Creates the JSON payload for a chat request.
     /// - Parameters:
     ///   - query: The user's message.
     ///   - token: The app-supplied auth token to attach, or `nil`/blank to omit the `data` part entirely.
+    ///   - extraXDMFields: Additional XDM data to merge alongside `identityMap`, e.g. from a
+    ///     `ConciergeDataHandoffEvent`. The SDK's own `identityMap` always wins on key collision.
     /// - Returns: JSON data for the request body
     /// - Note: Internal visibility for testing
-    func createChatPayload(query: String, token: String? = nil) throws -> Data {
-        guard let ecid = configuration.ecid else { throw ConciergeError.invalidEcid("Unable to create concierge request payload. ECID is nil.") }
+    func createChatPayload(query: String, token: String? = nil, extraXDMFields: [String: Any]? = nil) throws -> Data {
+        // ECID here is only the readiness gate; the full identityMap is forwarded below
+        guard configuration.ecid != nil else { throw ConciergeError.invalidEcid("Unable to create concierge request payload. ECID is nil.") }
         guard !configuration.surfaces.isEmpty else { throw ConciergeError.invalidSurfaces("Unable to create concierge request payload. No surfaces were provided.") }
 
         let consentState = ConsentState(configValue: configuration.consentCollectValue).payloadValue
+
+        // Forward identityMap verbatim; falls back to an ECID-only map
+        let identityMapPayload: [String: Any] = USE_TEMPS
+            ? [ConciergeConstants.Request.Keys.ECID: [[ConciergeConstants.Request.Keys.ID: TEMP_ecid]]]
+            : configuration.identityMapPayload
 
         var conversation: [String: Any] = [
             ConciergeConstants.Request.Keys.SURFACES: USE_TEMPS ? [TEMP_surface] : configuration.surfaces,
@@ -192,21 +227,22 @@ class ConciergeChatService: NSObject {
             conversation[ConciergeConstants.Request.Keys.AuthData.DATA] = dataPart
         }
 
+        var xdm: [String: Any] = [
+            ConciergeConstants.Request.Keys.IDENTITY_MAP: identityMapPayload
+        ]
+        // Host-supplied handoff fields are shallow-merged alongside the SDK's own XDM. Collisions
+        // resolve in the SDK's favour so a caller can never displace `identityMap`.
+        if let extraXDMFields = extraXDMFields {
+            xdm.merge(extraXDMFields) { current, _ in current }
+        }
+
         let payload: [String: Any] = [
             ConciergeConstants.Request.Keys.EVENTS: [
                 [
                     ConciergeConstants.Request.Keys.QUERY: [
                         ConciergeConstants.Request.Keys.CONVERSATION: conversation
                     ],
-                    ConciergeConstants.Request.Keys.XDM: [
-                        ConciergeConstants.Request.Keys.IDENTITY_MAP: [
-                            ConciergeConstants.Request.Keys.ECID: [
-                                [
-                                    ConciergeConstants.Request.Keys.ID: USE_TEMPS ? TEMP_ecid : ecid
-                                ]
-                            ]
-                        ]
-                    ],
+                    ConciergeConstants.Request.Keys.XDM: xdm,
                     ConciergeConstants.Request.Keys.Consent.META: [
                         ConciergeConstants.Request.Keys.Consent.CONSENT: [
                             ConciergeConstants.Request.Keys.Consent.STATE: consentState
@@ -271,6 +307,25 @@ class ConciergeChatService: NSObject {
         ]
     }
 
+    /// Cancels the turn currently in flight, if any. The delegate still reports completion, so the
+    /// caller unwinds through its normal failure path.
+    func cancelActiveStream() {
+        disconnect()
+    }
+
+    func endFeedbackForIdentityReset() {
+        feedbackLock.lock()
+        feedbackEndedForIdentityReset = true
+        let tasks = Array(feedbackTasks.values)
+        feedbackTasks.removeAll()
+        feedbackLock.unlock()
+        tasks.forEach { $0.cancel() }
+    }
+
+    func invalidateTransportForIdentityReset() {
+        session.invalidateAndCancel()
+    }
+
     private func disconnect() {
         dataTask?.cancel()
         dataTask = nil
@@ -316,7 +371,15 @@ extension ConciergeChatService: URLSessionDataDelegate {
         if let error = error {
             // Handle connection errors
             Log.warning(label: LOG_TAG, "An error occurred while connecting to the Concierge server: \(error.localizedDescription)")
-            onCompleteHandler?(.unreachable)
+            // A timed-out turn is reported distinctly from an unreachable host so a data handoff
+            // caller can retry a slow turn without retrying one the service actively rejected.
+            // The domain is checked too: -1001 in any other domain is a different failure.
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+                onCompleteHandler?(.timeout(Int(ConciergeConstants.Request.READ_TIMEOUT)))
+            } else {
+                onCompleteHandler?(.unreachable)
+            }
         } else {
             // Connection completed (e.g., server closed connection)
             Log.trace(label: LOG_TAG, "Concierge server connection closed.")

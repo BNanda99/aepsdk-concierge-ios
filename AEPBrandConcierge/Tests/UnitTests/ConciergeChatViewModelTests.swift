@@ -12,16 +12,48 @@
 
 import AEPCore
 import XCTest
+import UIKit
 @testable import AEPBrandConcierge
 
 // MARK: - Fakes
 private final class NoopSpeaker: TextSpeaking { func utter(text: String) {} }
 
+private actor ResetTokenGate {
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var released = false
+
+    func wait(_ entered: XCTestExpectation) async -> String? {
+        if released { return "test-token" }
+        return await withCheckedContinuation {
+            continuation = $0
+            entered.fulfill()
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume(returning: "test-token")
+        continuation = nil
+    }
+}
+
 @MainActor
 final class ChatControllerTests: XCTestCase {
     
     private var mockConciergeConfiguration = ConciergeConfiguration()
-    
+
+    // Both a sent turn and a data handoff read the store fresh at send-time, so every test in
+    // this file needs it empty going in, and must not leak state into the next test's controller.
+    override func setUp() {
+        super.setUp()
+        ConciergeXDMContextStore.shared.clear()
+    }
+
+    override func tearDown() {
+        ConciergeXDMContextStore.shared.clear()
+        super.tearDown()
+    }
+
     func test_sendMessage_ignores_when_text_empty_or_not_idle() {
         let fakeService = MockChatService(configuration: mockConciergeConfiguration)
         let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
@@ -32,10 +64,540 @@ final class ChatControllerTests: XCTestCase {
 
         // Non-idle -> ignored
         controller.applyTextChange("hi")
-        controller.chatState = .processing
+        controller.setChatStateForTesting(.processing)
         controller.sendMessage(isUser: true)
         XCTAssertEqual(controller.messages.count, 0)
         XCTAssertEqual(controller.chatState, .processing)
+    }
+
+    func test_handleDataHandoff_sendsRoutingHintAsQuery_andDoesNotAppendUserBubble() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        let xdmFields: [String: Any] = ["commerce": ["order": ["purchaseID": "abc123"]]]
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: xdmFields)
+        spinUntil(fakeService.lastQuery != nil)
+
+        XCTAssertEqual(fakeService.lastQuery, "successful-checkout")
+        XCTAssertTrue((fakeService.lastExtraXDMFields as NSDictionary?)?.isEqual(to: xdmFields) ?? false)
+
+        // Only the assistant placeholder should have been appended - no visible user bubble.
+        XCTAssertEqual(controller.messages.count, 1)
+        if case .basic(let isUserMessage) = controller.messages[0].template {
+            XCTAssertFalse(isUserMessage)
+        } else {
+            XCTFail("Expected a basic message template")
+        }
+    }
+
+    // MARK: - updateXDMContext merge
+
+    func test_identityReset_cancelsStalledReply_clearsDraftAndTranscript_andAllowsNewController() {
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        service.completesOnCancel = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: service)
+        var callbackCount = 0
+        controller.handleDataHandoff(routingHint: "old-turn", xdmFields: ["order": "old-order"]) { _ in
+            callbackCount += 1
+        }
+        spinUntil(service.streamChatCallCount == 1)
+        let started = Date()
+        let boundary = ConciergeIdentityBoundary.shared
+        let generation = boundary.begin(at: started)
+        controller.endConversationForIdentityReset()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(callbackCount, 1)
+        XCTAssertEqual(service.cancelActiveStreamCallCount, 1)
+        XCTAssertTrue(controller.messages.isEmpty)
+        XCTAssertTrue(controller.inputText.isEmpty)
+        XCTAssertFalse(controller.sendEnabled)
+        XCTAssertFalse(controller.micEnabled)
+        service.triggerCompletion()
+        spinUntil(controller.chatState == .idle)
+        XCTAssertEqual(callbackCount, 1)
+        XCTAssertTrue(controller.messages.isEmpty)
+        boundary.complete(generation)
+        controller.applyTextChange("must not revive old controller")
+        XCTAssertTrue(controller.inputText.isEmpty)
+        let nextService = MockChatService(configuration: mockConciergeConfiguration)
+        let next = makeController(configuration: mockConciergeConfiguration, service: nextService)
+        next.applyTextChange("new user")
+        next.sendMessage(isUser: true)
+        spinUntil(nextService.streamChatCallCount == 1)
+        XCTAssertEqual(nextService.lastQuery, "new user")
+    }
+
+    func test_identityReset_clearsUnsentDraft() {
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: service)
+        controller.applyTextChange("private unsent draft")
+        controller.endConversationForIdentityReset()
+        XCTAssertTrue(controller.inputText.isEmpty)
+        XCTAssertTrue(controller.messages.isEmpty)
+        XCTAssertEqual(service.streamChatCallCount, 0)
+    }
+
+    func test_identityReset_pendingAuth_cannotSendOldCapturedContext_andRetainsProvider() async throws {
+        let gate = ResetTokenGate()
+        let entered = expectation(description: "Old turn is waiting for auth")
+        ConciergeAuthTokenResolver.shared.setProvider({ await gate.wait(entered) }, timeout: 5)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+        try ConciergeXDMContextStore.shared.update(["oldUser": true])
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: service)
+        controller.applyTextChange("old query")
+        controller.sendMessage(isUser: true)
+        await fulfillment(of: [entered], timeout: 2)
+        let boundary = ConciergeIdentityBoundary.shared
+        let generation = boundary.begin(at: Date())
+        controller.endConversationForIdentityReset()
+        ConciergeXDMContextStore.shared.clear()
+        try ConciergeXDMContextStore.shared.update(["newUser": true])
+        boundary.complete(generation)
+        await gate.release()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(service.streamChatCallCount, 0)
+        XCTAssertTrue(controller.messages.isEmpty)
+        let retainedToken = await ConciergeAuthTokenResolver.shared.resolveToken()
+        XCTAssertEqual(retainedToken, "test-token", "Reset must not erase the host's provider registration.")
+    }
+
+    func test_identityReset_stopsSpeech_andRejectsLatePartialTranscript() async throws {
+        let capturer = MockSpeechCapturer()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: service, capturer: capturer)
+        controller.startRecording(currentSelectionLocation: 0)
+        let oldPartial = capturer.responseProcessor
+        let boundary = ConciergeIdentityBoundary.shared
+        let generation = boundary.begin(at: Date())
+        controller.endConversationForIdentityReset()
+        boundary.complete(generation)
+        oldPartial?("old speech")
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertEqual(capturer.endCaptures, 1)
+        XCTAssertTrue(controller.inputText.isEmpty)
+        XCTAssertFalse(controller.isRecording)
+    }
+
+    func test_sendMessage_mergesHeldXDMContext_intoTheOutboundTurn() throws {
+        try ConciergeXDMContextStore.shared.update(["loggedIn": true])
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+        spinUntil(fakeService.lastQuery != nil)
+
+        XCTAssertTrue((fakeService.lastExtraXDMFields as NSDictionary?)?.isEqual(to: ["loggedIn": true]) ?? false)
+        XCTAssertEqual(fakeService.lastSessionID, mockConciergeConfiguration.sessionId)
+    }
+
+    func test_sendMessage_withNoHeldXDMContext_sendsNilExtraXDMFields() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+        spinUntil(fakeService.lastQuery != nil)
+
+        XCTAssertNil(fakeService.lastExtraXDMFields)
+    }
+
+    func test_handleDataHandoff_mergesHeldXDMContext_withItsOwnFieldsWinningOnCollision() throws {
+        try ConciergeXDMContextStore.shared.update([
+            "loyalty": ["tier": "gold"],
+            "commerce": [
+                "order": ["purchaseID": "held-should-lose", "currency": "USD"],
+                "cart": ["cartID": "cart-123"]
+            ]
+        ])
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "successful-checkout",
+                                     xdmFields: ["commerce": ["order": ["purchaseID": "abc123"]]])
+        spinUntil(fakeService.lastQuery != nil)
+
+        let expected: [String: Any] = [
+            "loyalty": ["tier": "gold"],
+            "commerce": [
+                "order": ["purchaseID": "abc123", "currency": "USD"],
+                "cart": ["cartID": "cart-123"]
+            ]
+        ]
+        XCTAssertTrue((fakeService.lastExtraXDMFields as NSDictionary?)?.isEqual(to: expected) ?? false)
+    }
+
+    func test_handleDataHandoff_preservesNullAsAValueWithoutDeletingHeldContext() throws {
+        try ConciergeXDMContextStore.shared.update(["commerce": ["order": ["purchaseID": "held", "currency": "USD"]]])
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "checkout",
+                                     xdmFields: ["commerce": ["order": ["purchaseID": NSNull()]]])
+        spinUntil(fakeService.lastQuery != nil)
+
+        let expected: [String: Any] = ["commerce": ["order": ["purchaseID": NSNull(), "currency": "USD"]]]
+        XCTAssertTrue((fakeService.lastExtraXDMFields as NSDictionary?)?.isEqual(to: expected) ?? false)
+        XCTAssertTrue((ConciergeXDMContextStore.shared.snapshot(for: fakeService.lastSessionID!) as NSDictionary).isEqual(to: [
+            "commerce": ["order": ["purchaseID": "held", "currency": "USD"]]
+        ]))
+    }
+
+    func test_sendMessage_withHeldXDMContext_includesItOnTheQuerySubmittedEvent_forAssuranceVisibility() throws {
+        try ConciergeXDMContextStore.shared.update(["loggedIn": true])
+        var dispatchedEvents: [Event] = []
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService) { event in
+            dispatchedEvents.append(event)
+        }
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+        spinUntil(fakeService.lastQuery != nil)
+
+        let queryEvents = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.QUERY_SUBMITTED }
+        XCTAssertEqual(queryEvents.count, 1)
+        let sentXDM = queryEvents.first?.data?[ConciergeConstants.TrackingEvent.EventData.Key.XDM_FIELDS] as? [String: Any]
+        XCTAssertTrue((sentXDM as NSDictionary?)?.isEqual(to: ["loggedIn": true]) ?? false)
+    }
+
+    func test_sendMessage_withNoHeldXDMContext_querySubmittedEventOmitsXdmFieldsKey() {
+        var dispatchedEvents: [Event] = []
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService) { event in
+            dispatchedEvents.append(event)
+        }
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+        spinUntil(fakeService.lastQuery != nil)
+
+        let queryEvent = dispatchedEvents.first { $0.name == ConciergeConstants.TrackingEvent.Name.QUERY_SUBMITTED }
+        XCTAssertNil(queryEvent?.data?[ConciergeConstants.TrackingEvent.EventData.Key.XDM_FIELDS])
+    }
+
+    func test_sendMessage_usesTheSameXDMContextSnapshotForAssuranceAndRequest() async throws {
+        let providerEntered = expectation(description: "auth token provider started")
+        ConciergeAuthTokenResolver.shared.setProvider({
+            providerEntered.fulfill()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            return "test-token"
+        }, timeout: 5)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+
+        try ConciergeXDMContextStore.shared.update(["loyalty": ["tier": "gold"]])
+        var dispatchedEvents: [Event] = []
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService) { event in
+            dispatchedEvents.append(event)
+        }
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+        await fulfillment(of: [providerEntered], timeout: 2)
+
+        try ConciergeXDMContextStore.shared.update(["loyalty": ["tier": "platinum"]])
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(fakeService.streamChatCallCount, 1, "the turn should reach the service after the token is released")
+
+        let queryEvent = dispatchedEvents.first { $0.name == ConciergeConstants.TrackingEvent.Name.QUERY_SUBMITTED }
+        let assuranceXDM = queryEvent?.data?[ConciergeConstants.TrackingEvent.EventData.Key.XDM_FIELDS] as? [String: Any]
+        let expected: [String: Any] = ["loyalty": ["tier": "gold"]]
+        XCTAssertTrue((assuranceXDM as NSDictionary?)?.isEqual(to: expected) ?? false,
+                      "Assurance XDM was \(String(describing: assuranceXDM))")
+        XCTAssertTrue((fakeService.lastExtraXDMFields as NSDictionary?)?.isEqual(to: expected) ?? false,
+                      "Request XDM was \(String(describing: fakeService.lastExtraXDMFields))")
+    }
+
+    func test_handleDataHandoff_withLocalMessage_appendsItBeforeStreamingPlaceholder() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:], localMessage: "Your order is confirmed!")
+        spinUntil(fakeService.lastQuery != nil)
+
+        XCTAssertEqual(controller.messages.count, 2)
+        XCTAssertEqual(controller.messages[0].messageBody, "Your order is confirmed!")
+        if case .basic(let isUserMessage) = controller.messages[0].template {
+            XCTAssertFalse(isUserMessage)
+        } else {
+            XCTFail("Expected a basic message template")
+        }
+
+    }
+
+    func test_handleDataHandoff_withNilOrEmptyLocalMessage_appendsOnlyStreamingPlaceholder() {
+        let fakeServiceNil = MockChatService(configuration: mockConciergeConfiguration)
+        let controllerNil = makeController(configuration: mockConciergeConfiguration, service: fakeServiceNil)
+        controllerNil.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:], localMessage: nil)
+        spinUntil(fakeServiceNil.lastQuery != nil)
+        XCTAssertEqual(controllerNil.messages.count, 1)
+
+        let fakeServiceEmpty = MockChatService(configuration: mockConciergeConfiguration)
+        let controllerEmpty = makeController(configuration: mockConciergeConfiguration, service: fakeServiceEmpty)
+        controllerEmpty.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:], localMessage: "")
+        spinUntil(fakeServiceEmpty.lastQuery != nil)
+        XCTAssertEqual(controllerEmpty.messages.count, 1)
+    }
+
+    /// A handoff is refused while the *user's* own turn is streaming, not just while another
+    /// handoff is. Both occupy the service's single `dataTask`/handler pair.
+    func test_handleDataHandoff_whileATypedTurnIsInFlight_rejectsWithoutStartingStream() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false // keep the typed turn in flight
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.applyTextChange("what should I buy?")
+        controller.sendMessage(isUser: true)
+        spinUntil(fakeService.streamChatCallCount == 1)
+
+        var completionCalls: [ConciergeError?] = []
+        let started = controller.handleDataHandoff(routingHint: "successful-checkout",
+                                                   xdmFields: ["commerce": ["order": ["purchaseID": "abc123"]]],
+                                                   localMessage: "This must not render") { error in
+            completionCalls.append(error)
+        }
+
+        XCTAssertFalse(started)
+        XCTAssertEqual(fakeService.lastQuery, "what should I buy?")
+        XCTAssertEqual(fakeService.streamChatCallCount, 1, "the rejected handoff must not reach the service")
+        XCTAssertFalse(controller.messages.contains { $0.messageBody == "This must not render" })
+        // A rejected handoff is reported through the `false` return, not the completion - firing
+        // both would deliver two results for one request.
+        XCTAssertTrue(completionCalls.isEmpty)
+    }
+
+    /// Regression: `handleDataHandoff` must mark the chat as processing itself. `sendMessage` sets
+    /// `.processing` before streaming, but a handoff bypasses `sendMessage`, so without its own
+    /// transition a second handoff still saw `.idle` and started an overlapping stream - which
+    /// overwrites `ConciergeChatService`'s single handler pair and strands the first completion.
+    func test_handleDataHandoff_whileAnotherHandoffIsInFlight_isRejected() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false // keep the first handoff in flight
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        let first = controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:])
+        spinUntil(fakeService.streamChatCallCount == 1)
+        XCTAssertTrue(first)
+        XCTAssertEqual(controller.chatState, .processing)
+
+        let second = controller.handleDataHandoff(routingHint: "second-handoff",
+                                                  xdmFields: [:],
+                                                  localMessage: "This must not render")
+
+        XCTAssertFalse(second)
+        XCTAssertEqual(fakeService.streamChatCallCount, 1, "A second overlapping stream was started")
+        XCTAssertEqual(fakeService.lastQuery, "successful-checkout")
+        XCTAssertFalse(controller.messages.contains { $0.messageBody == "This must not render" })
+    }
+
+    /// A handoff in flight must also block a user-typed turn, for the same single-handler reason.
+    func test_sendMessage_whileHandoffIsInFlight_isIgnored() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:])
+        spinUntil(fakeService.streamChatCallCount == 1)
+
+        controller.applyTextChange("hello")
+        controller.sendMessage(isUser: true)
+
+        // `sendMessage` appends the user bubble synchronously once past its guard, so its absence
+        // is a deterministic signal that the turn was rejected - unlike `streamChatCallCount`,
+        // which only rises after the async token resolution.
+        XCTAssertFalse(controller.messages.contains { $0.messageBody == "hello" })
+        spinUntil(timeout: 0.3, fakeService.streamChatCallCount > 1)
+        XCTAssertEqual(fakeService.streamChatCallCount, 1)
+        XCTAssertEqual(fakeService.lastQuery, "successful-checkout")
+    }
+
+    func test_handleDataHandoff_afterPreviousHandoffCompletes_isAccepted() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "first", xdmFields: [:])
+        spinUntil(fakeService.streamChatCallCount == 1)
+        XCTAssertFalse(controller.handleDataHandoff(routingHint: "too-soon", xdmFields: [:]))
+
+        // Finish the first turn; the controller returns to idle and the retry is accepted.
+        fakeService.triggerCompletion()
+        spinUntil(controller.chatState == .idle)
+
+        let retry = controller.handleDataHandoff(routingHint: "retry", xdmFields: [:])
+        spinUntil(fakeService.lastQuery == "retry")
+
+        XCTAssertTrue(retry)
+        XCTAssertEqual(fakeService.streamChatCallCount, 2)
+    }
+
+    /// The documented contract is that the app may retry once the chat is no longer processing.
+    /// Failed turns now return to `.idle`, but the guard stays on `!= .processing` so a handoff is
+    /// still accepted if anything ever leaves the controller in an error state.
+    func test_handleDataHandoff_afterErrorState_isAccepted() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        controller.setChatStateForTesting(.error(.networkFailure))
+
+        let started = controller.handleDataHandoff(routingHint: "retry-after-failure", xdmFields: [:])
+        spinUntil(fakeService.lastQuery != nil)
+
+        XCTAssertTrue(started)
+        XCTAssertEqual(fakeService.lastQuery, "retry-after-failure")
+    }
+
+    // MARK: - Data handoff scrolling and conversation state
+
+    /// A handoff is triggered from app UI, not the composer, so without its own scroll the reply
+    /// streams in below the fold and the user has to scroll manually to find it.
+    func test_handleDataHandoff_withLocalMessage_scrollsToTheLocalMessage() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        let tickBefore = controller.userScrollTick
+
+        controller.handleDataHandoff(routingHint: "successful-checkout",
+                                     xdmFields: [:],
+                                     localMessage: "Thank you for purchasing Headphones")
+        spinUntil(controller.userScrollTick > tickBefore)
+
+        XCTAssertGreaterThan(controller.userScrollTick, tickBefore)
+        let anchor = controller.messages.first { $0.messageBody == "Thank you for purchasing Headphones" }
+        XCTAssertNotNil(anchor)
+        XCTAssertEqual(controller.userMessageToScrollId, anchor?.id)
+    }
+
+    /// With no local message the streaming placeholder is the first thing the turn renders, so it
+    /// becomes the anchor - otherwise the reply would still land off screen.
+    func test_handleDataHandoff_withoutLocalMessage_scrollsToTheStreamingPlaceholder() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        let tickBefore = controller.userScrollTick
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:])
+        spinUntil(controller.userScrollTick > tickBefore)
+
+        XCTAssertEqual(controller.messages.count, 1)
+        XCTAssertEqual(controller.userMessageToScrollId, controller.messages.first?.id)
+    }
+
+    func test_handleDataHandoff_whenRejected_doesNotScroll() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false // keep the first turn in flight
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.handleDataHandoff(routingHint: "first", xdmFields: [:])
+        spinUntil(fakeService.streamChatCallCount == 1)
+        spinUntil(timeout: 0.3, false) // let the accepted turn's own scroll land first
+        let tickBefore = controller.userScrollTick
+        let anchorBefore = controller.userMessageToScrollId
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:], localMessage: "Nope")
+        spinUntil(timeout: 0.3, controller.userScrollTick != tickBefore)
+
+        XCTAssertEqual(controller.userScrollTick, tickBefore)
+        XCTAssertEqual(controller.userMessageToScrollId, anchorBefore,
+                       "a rejected handoff must not move the transcript off the live turn")
+    }
+
+    /// A handoff appends only agent-styled messages. Keying "the conversation has started" off a
+    /// *user* message would leave a checkout-driven conversation looking untouched - welcome header
+    /// rendered above the handoff turn, and no scroll-to-latest when the chat is opened.
+    func test_hasConversationStarted_isTrueAfterAHandoffWithNoUserMessage() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        XCTAssertFalse(controller.hasConversationStarted)
+
+        controller.handleDataHandoff(routingHint: "successful-checkout",
+                                     xdmFields: [:],
+                                     localMessage: "Thank you for purchasing Headphones")
+
+        XCTAssertTrue(controller.hasConversationStarted)
+    }
+
+    func test_hasConversationStarted_isFalseForWelcomeContentOnly() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        controller.messages = [
+            Message(template: .welcomeHeader(title: "Hi", body: "How can I help?")),
+            Message(template: .welcomePromptSuggestion(imageSource: .remote(nil), text: "Find me shoes", background: .clear))
+        ]
+
+        XCTAssertFalse(controller.hasConversationStarted)
+    }
+
+    // MARK: - Data handoff completion
+    func test_handleDataHandoff_onSuccessfulStream_completesWithoutError() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = [makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Here are some picks")]
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        var completionCalls: [ConciergeError?] = []
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:]) { error in
+            completionCalls.append(error)
+        }
+        spinUntil(completionCalls.count == 1)
+
+        XCTAssertEqual(completionCalls.count, 1)
+        XCTAssertNil(completionCalls.first ?? .unknown)
+        spinUntil(controller.chatState == .idle)
+        XCTAssertEqual(controller.chatState, .idle)
+    }
+
+    func test_handleDataHandoff_onServiceError_completesWithThatError() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedError = .unreachable
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        var completionCalls: [ConciergeError?] = []
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:]) { error in
+            completionCalls.append(error)
+        }
+        spinUntil(completionCalls.count == 1)
+
+        XCTAssertEqual(completionCalls.count, 1)
+        guard case .unreachable = completionCalls.first ?? nil else {
+            return XCTFail("Expected the service error to reach the handoff completion, got \(String(describing: completionCalls.first))")
+        }
+    }
+
+    /// An empty response renders a fallback bubble rather than recommendations, so the handoff
+    /// did not actually deliver anything and must not be reported as a success.
+    func test_handleDataHandoff_onEmptyResponse_completesWithInvalidResponseData() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        var completionCalls: [ConciergeError?] = []
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:]) { error in
+            completionCalls.append(error)
+        }
+        spinUntil(completionCalls.count == 1)
+
+        XCTAssertEqual(completionCalls.count, 1)
+        guard case .invalidResponseData = completionCalls.first ?? nil else {
+            return XCTFail("Expected .invalidResponseData, got \(String(describing: completionCalls.first))")
+        }
+    }
+
+    /// The completion resolves the app's public callback, which may trigger an immediate retry.
+    /// It must therefore fire only once chat state has settled, or that retry races a stale
+    /// `.processing` and is rejected for no real reason.
+    func test_handleDataHandoff_completionFiresAfterChatStateSettles() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = [makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Done")]
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        var stateAtCompletion: ChatState?
+
+        controller.handleDataHandoff(routingHint: "successful-checkout", xdmFields: [:]) { [weak controller] _ in
+            stateAtCompletion = controller?.chatState
+        }
+        spinUntil(stateAtCompletion != nil)
+
+        XCTAssertEqual(stateAtCompletion, .idle)
     }
 
     func test_streaming_inProgress_accumulates_and_updates_placeholder() {
@@ -111,7 +673,342 @@ final class ChatControllerTests: XCTestCase {
         XCTAssertNotNil(fakeService.lastFeedbackData, "feedback event data should be forwarded")
     }
 
-    func test_streaming_error_removes_placeholder_and_sets_error_state() {
+    func test_sendFeedbackFor_doesNotIncludeHeldXDMContext() throws {
+        try ConciergeXDMContextStore.shared.update(["page": "pdp-123"])
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(
+            messageId: messageId,
+            with: FeedbackPayload(sentiment: .positive, selectedOptions: [], notes: "")
+        )
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        XCTAssertNil(xdm?["page"], "Held chat context must not be attached to feedback submissions")
+    }
+
+    func test_streaming_error_replaces_placeholder_with_error_message_and_returns_to_idle() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = []
+        fakeService.plannedError = .unreachable
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        controller.networkErrorMessage = "Themed connection error"
+
+        controller.applyTextChange("hi")
+        controller.sendMessage(isUser: true)
+
+        // Allow onComplete to run
+        spinUntil(controller.chatState == .idle)
+
+        // The user message plus the failure notice; the streaming placeholder is gone.
+        XCTAssertEqual(controller.messages.count, 2)
+        XCTAssertEqual(controller.messages.last?.messageBody, "Themed connection error")
+        if case .basic(let isUserMessage) = controller.messages.last?.template {
+            XCTAssertFalse(isUserMessage, "the failure notice must read as an agent message")
+        } else {
+            XCTFail("expected a basic agent message")
+        }
+        XCTAssertEqual(controller.chatState, .idle,
+                       "a failed turn must return to idle - parking in .error deadlocks the composer")
+    }
+
+    func test_streamingErrorAfterBackground_waitsForForegroundThenRetriesOnce() {
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        service.plannedChunks = [
+            makePayload(state: ConciergeConstants.StreamState.IN_PROGRESS, message: "Partial answer")
+        ]
+        service.onStreamChat = { [weak service] in
+            guard let service = service, service.streamChatCallCount == 2 else { return }
+            service.plannedChunks = [
+                self.makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Recovered answer")
+            ]
+            service.plannedError = nil
+            service.shouldCallComplete = true
+        }
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1 && controller.messages.last?.messageBody == "Partial answer")
+
+        postAppBackgroundNotification()
+        service.plannedError = .unreachable
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+
+        XCTAssertEqual(service.streamChatCallCount, 1, "the retry must wait until UIKit reports foreground")
+        XCTAssertEqual(controller.chatState, .processing)
+        XCTAssertFalse(controller.messages.contains { $0.messageBody == "Partial answer" },
+                       "partial output from the failed attempt must be discarded")
+
+        postAppForegroundNotification()
+        spinUntil(service.streamChatCallCount == 2 && controller.chatState == .idle)
+
+        XCTAssertEqual(service.lastQuery, "question")
+        XCTAssertEqual(service.streamChatCallCount, 2, "a failed recovery attempt must not retry again")
+        XCTAssertEqual(controller.messages.last?.messageBody, "Recovered answer")
+    }
+
+    func test_streamingBackgroundRecovery_resendReportsItsOwnPairedResponseEvents() {
+        var dispatchedEvents: [Event] = []
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        service.plannedChunks = [
+            makePayload(state: ConciergeConstants.StreamState.IN_PROGRESS, message: "Partial answer",
+                        conversationId: "conv-1", interactionId: "int-1")
+        ]
+        service.onStreamChat = { [weak service] in
+            guard let service = service, service.streamChatCallCount == 2 else { return }
+            service.plannedChunks = [
+                self.makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Recovered answer",
+                                 conversationId: "conv-1", interactionId: "int-2")
+            ]
+            service.plannedError = nil
+            service.shouldCallComplete = true
+        }
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        dispatch: { dispatchedEvents.append($0) },
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(controller.messages.last?.messageBody == "Partial answer")
+
+        postAppBackgroundNotification()
+        service.plannedError = .unreachable
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+        postAppForegroundNotification()
+        spinUntil(service.streamChatCallCount == 2 && controller.chatState == .idle)
+
+        let key = ConciergeConstants.TrackingEvent.EventData.Key.self
+        let startedEvents = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.RESPONSE_STARTED }
+        let completedEvents = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.RESPONSE_COMPLETED }
+        XCTAssertEqual(controller.messages.last?.messageBody, "Recovered answer")
+        XCTAssertEqual(startedEvents.compactMap { $0.data?[key.INTERACTION_ID] as? String }, ["int-1", "int-2"],
+                       "each attempt reports responseStarted under its own interaction ID")
+        XCTAssertEqual(completedEvents.count, 1, "only the resend completes")
+        XCTAssertEqual(completedEvents.first?.data?[key.INTERACTION_ID] as? String, "int-2",
+                       "responseCompleted must match the resend's responseStarted")
+        XCTAssertEqual(completedEvents.first?.data?[key.CONVERSATION_ID] as? String,
+                       startedEvents.last?.data?[key.CONVERSATION_ID] as? String)
+    }
+
+    func test_streamingBackgroundRecovery_skipsResendWhenSessionWindowElapsed() {
+        var dispatchedEvents: [Event] = []
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        dispatch: { dispatchedEvents.append($0) },
+                                        appState: appState,
+                                        backgroundRecoveryMaxAge: 0)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1)
+
+        postAppBackgroundNotification()
+        service.plannedError = .unreachable
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+        XCTAssertEqual(controller.chatState, .processing, "recovery is still pending while backgrounded")
+
+        postAppForegroundNotification()
+        spinUntil(controller.chatState == .idle)
+
+        let errorCount = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.ERROR_OCCURRED }.count
+        XCTAssertEqual(service.streamChatCallCount, 1, "an expired session window must not be resent")
+        XCTAssertEqual(controller.chatState, .idle)
+        XCTAssertEqual(controller.messages.last?.messageBody, controller.networkErrorMessage)
+        XCTAssertEqual(errorCount, 1)
+    }
+
+    func test_streamingBackgroundRecovery_resendCarriesOriginalSessionIDAndXDMContext() throws {
+        try ConciergeXDMContextStore.shared.update(["loggedIn": true])
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        var attempts: [(sessionID: String?, xdmFields: [String: Any]?)] = []
+        service.onStreamChat = { [weak service] in
+            guard let service = service else { return }
+            attempts.append((service.lastSessionID, service.lastExtraXDMFields))
+            if service.streamChatCallCount == 2 {
+                service.plannedChunks = [
+                    self.makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Recovered answer")
+                ]
+                service.plannedError = nil
+                service.shouldCallComplete = true
+            }
+        }
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1)
+
+        postAppBackgroundNotification()
+        service.plannedError = .timeout(30)
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+
+        // Context changing while backgrounded must not leak into the resend of the original question.
+        ConciergeXDMContextStore.shared.clear()
+        try ConciergeXDMContextStore.shared.update(["loggedIn": false])
+
+        postAppForegroundNotification()
+        spinUntil(service.streamChatCallCount == 2 && controller.chatState == .idle)
+
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertNotNil(attempts.first?.sessionID)
+        XCTAssertEqual(attempts.last?.sessionID, attempts.first?.sessionID,
+                       "the resend must reuse the original attempt's session ID")
+        XCTAssertTrue((attempts.first?.xdmFields as NSDictionary?)?.isEqual(to: ["loggedIn": true]) ?? false)
+        XCTAssertTrue((attempts.last?.xdmFields as NSDictionary?)?.isEqual(to: ["loggedIn": true]) ?? false,
+                      "the resend must reuse the original attempt's XDM context, not a fresh snapshot")
+        XCTAssertEqual(service.lastQuery, "question")
+    }
+
+    func test_streamingBackgroundRecovery_resendsImmediatelyWhenForegroundedBeforeFailureArrives() {
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        service.onStreamChat = { [weak service] in
+            guard let service = service, service.streamChatCallCount == 2 else { return }
+            service.plannedChunks = [
+                self.makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Recovered answer")
+            ]
+            service.plannedError = nil
+            service.shouldCallComplete = true
+        }
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1)
+
+        postAppBackgroundNotification()
+        postAppForegroundNotification()
+        spinUntil(appState.state == .foreground)
+
+        // The failure from the suspended request only arrives after the app is already back.
+        service.plannedError = .unreachable
+        service.triggerCompletion()
+        spinUntil(service.streamChatCallCount == 2 && controller.chatState == .idle)
+
+        XCTAssertEqual(service.streamChatCallCount, 2,
+                       "the resend must start without waiting for another foreground notification")
+        XCTAssertEqual(controller.messages.last?.messageBody, "Recovered answer")
+    }
+
+    func test_streamingBackgroundRecoveryFailure_rendersErrorWithoutFurtherRetry() {
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        service.onStreamChat = { [weak service] in
+            guard let service = service else { return }
+            if service.streamChatCallCount == 2 {
+                service.plannedError = .unreachable
+                service.shouldCallComplete = true
+            }
+        }
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1)
+
+        postAppBackgroundNotification()
+        service.plannedError = .timeout(30)
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+        postAppForegroundNotification()
+        spinUntil(service.streamChatCallCount == 2 && controller.chatState == .idle)
+
+        XCTAssertEqual(service.streamChatCallCount, 2)
+        XCTAssertEqual(controller.messages.last?.messageBody, controller.networkErrorMessage)
+    }
+
+    func test_streamingCompletedResponse_followedByTransportError_isPreserved() {
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.plannedChunks = [
+            makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Finished answer")
+        ]
+        service.plannedError = .unreachable
+        postAppBackgroundNotification()
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(controller.chatState == .idle)
+
+        XCTAssertEqual(service.streamChatCallCount, 1, "a completed response must not be resent")
+        XCTAssertEqual(controller.messages.last?.messageBody, "Finished answer")
+    }
+
+    func test_streamingFailureWithoutBackgroundOverlap_doesNotRetry() {
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.plannedError = .unreachable
+        let controller = makeController(configuration: mockConciergeConfiguration, service: service)
+
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(controller.chatState == .idle)
+
+        XCTAssertEqual(service.streamChatCallCount, 1)
+        XCTAssertEqual(controller.messages.last?.messageBody, controller.networkErrorMessage)
+    }
+
+    func test_identityResetWhileWaitingForForeground_preventsRecoveryRetry() {
+        let appState = ConciergeAppState()
+        let service = MockChatService(configuration: mockConciergeConfiguration)
+        service.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration,
+                                        service: service,
+                                        appState: appState)
+        controller.applyTextChange("question")
+        controller.sendMessage(isUser: true)
+        spinUntil(service.streamChatCallCount == 1)
+
+        postAppBackgroundNotification()
+        service.plannedError = .unreachable
+        service.triggerCompletion()
+        spinUntil(controller.messages.count == 1)
+        controller.endConversationForIdentityReset()
+        postAppForegroundNotification()
+        spinUntil(timeout: 0.1, false)
+
+        XCTAssertEqual(service.streamChatCallCount, 1)
+        XCTAssertTrue(controller.messages.isEmpty)
+        XCTAssertFalse(controller.isProcessing)
+    }
+
+    func test_backgroundRecoveryEligibility_excludesNonTransportErrors_andAllowsOneTransportRetry() {
+        let turn = ChatTurn(placeholderId: UUID(), kind: .typed)
+        turn.noteAppBackgrounded()
+
+        XCTAssertFalse(turn.reserveBackgroundRecovery(for: .invalidResponseData))
+        XCTAssertFalse(turn.reserveBackgroundRecovery(for: .unknown))
+        XCTAssertFalse(turn.hasUsedBackgroundRecovery)
+        XCTAssertTrue(turn.reserveBackgroundRecovery(for: .timeout(30)))
+        XCTAssertFalse(turn.reserveBackgroundRecovery(for: .unreachable))
+    }
+
+    /// Regression guard for the deadlock: every composer affordance is gated on `.idle`, so if a
+    /// failure left a terminal error state the user could type but never send again.
+    func test_streaming_error_leavesComposerUsable_andAllowsAnotherSend() {
         let fakeService = MockChatService(configuration: mockConciergeConfiguration)
         fakeService.plannedChunks = []
         fakeService.plannedError = .unreachable
@@ -119,12 +1016,298 @@ final class ChatControllerTests: XCTestCase {
 
         controller.applyTextChange("hi")
         controller.sendMessage(isUser: true)
+        spinUntil(controller.chatState == .idle)
 
-        // Allow onComplete to run
-        spinUntil(controller.chatState == .error(.networkFailure))
+        XCTAssertTrue(controller.micEnabled)
+        XCTAssertTrue(controller.composerEditable)
 
-        XCTAssertEqual(controller.messages.count, 1) // only user message remains
-        XCTAssertEqual(controller.chatState, .error(.networkFailure))
+        controller.applyTextChange("trying again")
+        XCTAssertTrue(controller.sendEnabled)
+
+        controller.sendMessage(isUser: true)
+        // The outbound call happens after an async auth-token resolution, so pump the run loop.
+        spinUntil(fakeService.streamChatCallCount == 2)
+
+        XCTAssertEqual(fakeService.streamChatCallCount, 2, "the retry must actually reach the service")
+        XCTAssertEqual(fakeService.lastQuery, "trying again")
+    }
+
+    func test_handoffCompletion_isDelivered_evenIfCallerReleasesControllerMidTurn() {
+        // Regression: the auth-token `Task` captured `self` weakly. The caller's completion is only
+        // guaranteed by the `defer` inside `onComplete`, which isn't registered until `streamChat`
+        // runs, so a controller released before that point dropped the completion entirely and left
+        // the caller to time out with a misleading `.noResponse`. The turn must now always report.
+        let resolved = expectation(description: "handoff completion delivered")
+        let providerEntered = expectation(description: "auth provider entered")
+
+        ConciergeAuthTokenResolver.shared.setProvider({
+            providerEntered.fulfill()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            return "token"
+        }, timeout: 5)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = []
+        fakeService.plannedError = .unreachable
+        var controller: ChatController? = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        var completionCalls: [ConciergeError?] = []
+        let started = controller?.handleDataHandoff(routingHint: "checkout complete",
+                                                    xdmFields: ["orderTotal": 42],
+                                                    localMessage: nil) { error in
+            completionCalls.append(error)
+            resolved.fulfill()
+        }
+        XCTAssertEqual(started, true)
+
+        wait(for: [providerEntered], timeout: 2.0)
+        controller = nil // caller drops its reference while the turn is still in flight
+
+        wait(for: [resolved], timeout: 5.0)
+        XCTAssertEqual(completionCalls.count, 1, "the completion must be delivered exactly once")
+        XCTAssertNotNil(completionCalls.first ?? nil, "a failed turn must surface its error")
+        XCTAssertEqual(fakeService.streamChatCallCount, 1,
+                       "the in-flight turn must still reach the service after the caller lets go")
+    }
+
+    func test_dataHandoffResponseTimeout_outlastsTheControllerCap() {
+        // Regression: the hub budget was `READ_TIMEOUT + token budget`. Because `READ_TIMEOUT` is
+        // `URLRequest.timeoutInterval` - an *inactivity* timeout - a turn that kept chunking
+        // steadily for longer than the budget succeeded and rendered, while the hub had already
+        // reported `.noResponse` to the caller.
+        XCTAssertGreaterThan(ConciergeConstants.Request.dataHandoffResponseTimeout,
+                             ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT,
+                             "the controller must always report the outcome before the hub gives up")
+
+        XCTAssertLessThan(ConciergeConstants.Request.DATA_HANDOFF_FIRST_CHUNK_TIMEOUT,
+                          ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT,
+                          "the fast cap must fire before the hard ceiling")
+
+        // The ceiling has to outlast a healthy streaming turn, or it cancels replies the user was
+        // about to see. `READ_TIMEOUT` is the tolerated gap between *individual* chunks, and one
+        // turn can contain several.
+        XCTAssertGreaterThan(ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT,
+                             ConciergeConstants.Request.READ_TIMEOUT,
+                             "the ceiling must outlast the per-chunk inactivity timeout")
+
+        // The budget is a fixed cap now, so a configured auth-token window cannot move it.
+        ConciergeAuthTokenResolver.shared.setProvider(nil)
+        let withoutProvider = ConciergeConstants.Request.dataHandoffResponseTimeout
+
+        ConciergeAuthTokenResolver.shared.setProvider({ "token" }, timeout: 30)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+
+        XCTAssertEqual(ConciergeConstants.Request.dataHandoffResponseTimeout, withoutProvider, accuracy: 0.001,
+                       "the response budget must not depend on the auth-token configuration")
+    }
+
+    func test_handoffThatNeverResponds_reportsTimeoutAndUnwindsTheTurn() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 5.0, handoffFirstChunkTimeout: 0.2)
+
+        var completions: [ConciergeError?] = []
+        let started = controller.handleDataHandoff(routingHint: "silent-turn", xdmFields: [:]) { error in
+            completions.append(error)
+        }
+        XCTAssertTrue(started)
+
+        spinUntil(timeout: 2.0, !completions.isEmpty)
+
+        XCTAssertEqual(completions.count, 1, "the caller must hear back exactly once")
+        guard case .timeout = completions.first ?? nil else {
+            return XCTFail("a silent turn must report .timeout, got \(String(describing: completions.first ?? nil))")
+        }
+        XCTAssertEqual(fakeService.cancelActiveStreamCallCount, 1,
+                       "a turn that produced nothing must be cancelled, not left running")
+
+        // Cancelling drives the delegate's failure path, which tries to complete a second time.
+        spinUntil(timeout: 1.0, controller.chatState == .idle)
+        XCTAssertEqual(completions.count, 1, "the cancellation must not deliver a second completion")
+        XCTAssertEqual(controller.chatState, .idle, "a timed-out turn must leave the chat usable")
+    }
+
+    func test_slowButStreamingHandoff_survivesTheFirstChunkCap() {
+        // The point of the two-stage design: a backend that is slow but alive must not have its
+        // reply thrown away. Only a turn that produces *nothing* fails fast.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 5.0, handoffFirstChunkTimeout: 0.3)
+
+        var completions: [ConciergeError?] = []
+        _ = controller.handleDataHandoff(routingHint: "slow-turn", xdmFields: [:]) { error in
+            completions.append(error)
+        }
+
+        spinUntil(timeout: 1.0, fakeService.streamChatCallCount == 1)
+        fakeService.emitChunk(makePayload(state: "in-progress", message: "thinking"))
+
+        // Outlive the first-chunk cap: the turn is alive, so nothing should fire.
+        spinUntil(timeout: 0.8, false)
+        XCTAssertTrue(completions.isEmpty, "a streaming turn must not be cut off by the fast cap")
+        XCTAssertEqual(fakeService.cancelActiveStreamCallCount, 0,
+                       "a streaming turn must never be cancelled by the fast cap")
+
+        fakeService.triggerCompletion()
+        spinUntil(!completions.isEmpty)
+        XCTAssertEqual(completions.count, 1)
+        XCTAssertNil(completions.first ?? nil, "the slow turn ultimately succeeded")
+    }
+
+    func test_failedHandoff_leavesNothingInTheTranscript() {
+        // A handoff is initiated by app code, not the user, so a failure must not put an error
+        // bubble in front of someone who never asked for the turn. The app hears about it through
+        // the completion instead. Inverse of a user-typed turn, which does render its failure.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = []
+        fakeService.plannedError = .unreachable
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+        controller.networkErrorMessage = "Themed connection error"
+
+        var completions: [ConciergeError?] = []
+        _ = controller.handleDataHandoff(routingHint: "checkout", xdmFields: [:]) { completions.append($0) }
+
+        spinUntil(controller.chatState == .idle)
+
+        XCTAssertTrue(controller.messages.isEmpty,
+                      "a failed handoff must leave no trace, not even the streaming placeholder")
+        XCTAssertEqual(completions.count, 1, "the app must still be told the handoff failed")
+        XCTAssertNotNil(completions.first ?? nil)
+    }
+
+    func test_failedHandoff_keepsAnAlreadyRenderedLocalMessage() {
+        // The local message is the one part the user has already seen, so removing it on failure
+        // would make content vanish from under them.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.plannedChunks = []
+        fakeService.plannedError = .unreachable
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        _ = controller.handleDataHandoff(routingHint: "checkout", xdmFields: [:],
+                                         localMessage: "Your order is confirmed!")
+
+        spinUntil(controller.chatState == .idle)
+
+        XCTAssertEqual(controller.messages.count, 1, "only the local message should remain")
+        XCTAssertEqual(controller.messages.first?.messageBody, "Your order is confirmed!")
+    }
+
+    func test_handoffWithNoCompletion_isStillCapped() {
+        // Regression: the caps were keyed off `handoffCompletion`, so a caller that passed no
+        // completion armed them and then had every fire no-op - parking the chat in `.processing`
+        // with no way back and no error.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 5.0, handoffFirstChunkTimeout: 0.2)
+
+        let started = controller.handleDataHandoff(routingHint: "no-callback", xdmFields: [:])
+        XCTAssertTrue(started)
+
+        spinUntil(timeout: 2.0, fakeService.cancelActiveStreamCallCount == 1)
+        XCTAssertEqual(fakeService.cancelActiveStreamCallCount, 1,
+                       "the cap must fire even when the caller wants no callback")
+
+        spinUntil(timeout: 1.0, controller.chatState == .idle)
+        XCTAssertEqual(controller.chatState, .idle, "the chat must not be left stuck in .processing")
+    }
+
+    func test_handoffCappedBeforeTheTurnReachesTheService_stillUnwindsTheChat() {
+        // Regression: the turn ceiling is armed before `streamAgentResponse` has finished awaiting
+        // the auth token, so it can fire while the service still has no `dataTask`. The unwind
+        // used to depend on `cancelActiveStream()` producing a delegate failure - but cancelling
+        // nothing reports nothing, so the chat stayed in `.processing` with a dead composer.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+
+        // A provider slower than the turn ceiling, so the ceiling fires mid-resolution. Apps can
+        // configure this: `setProvider(_:timeout:)` accepts anything up to `maxTimeout` (600s).
+        // The ceiling is the cap that runs during the token wait; the fast no-response cap only
+        // starts once a request is actually in flight.
+        ConciergeAuthTokenResolver.shared.setProvider({
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            return "late-token"
+        }, timeout: 30)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 0.2, handoffFirstChunkTimeout: 5.0)
+
+        var completions: [ConciergeError?] = []
+        let started = controller.handleDataHandoff(routingHint: "slow-token", xdmFields: [:]) { error in
+            completions.append(error)
+        }
+        XCTAssertTrue(started)
+
+        spinUntil(timeout: 2.0, !completions.isEmpty)
+        XCTAssertEqual(completions.count, 1, "the caller must hear back exactly once")
+        guard case .timeout = completions.first ?? nil else {
+            return XCTFail("a turn capped before it started must report .timeout, got \(String(describing: completions.first ?? nil))")
+        }
+        XCTAssertEqual(fakeService.streamChatCallCount, 0,
+                       "the cap must have fired before the turn reached the service")
+
+        spinUntil(timeout: 2.0, controller.chatState == .idle)
+        XCTAssertEqual(controller.chatState, .idle,
+                       "a turn capped before it started must still leave the chat usable")
+    }
+
+    func test_handoffCappedBeforeTheTurnStarts_doesNotLaterReviveTheTurn() {
+        // The second half of the same defect: once the token finally resolved, the abandoned turn
+        // went on to hit the network and render a reply into the transcript - for a handoff the app
+        // had already been told had timed out.
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        fakeService.shouldCallComplete = false
+
+        ConciergeAuthTokenResolver.shared.setProvider({
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            return "late-token"
+        }, timeout: 30)
+        defer { ConciergeAuthTokenResolver.shared.setProvider(nil) }
+
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 0.2, handoffFirstChunkTimeout: 5.0)
+
+        var completions: [ConciergeError?] = []
+        _ = controller.handleDataHandoff(routingHint: "slow-token", xdmFields: [:], localMessage: "Your order is confirmed!") { error in
+            completions.append(error)
+        }
+
+        spinUntil(timeout: 2.0, !completions.isEmpty)
+        spinUntil(timeout: 2.0, controller.chatState == .idle)
+
+        // Outlive the token resolution: the superseded turn must stay abandoned.
+        spinUntil(timeout: 1.5, false)
+
+        XCTAssertEqual(fakeService.streamChatCallCount, 0,
+                       "an abandoned turn must not reach the service once its token resolves")
+        XCTAssertEqual(completions.count, 1, "the abandoned turn must not deliver a second completion")
+        XCTAssertEqual(controller.chatState, .idle, "the revived turn must not put the chat back into .processing")
+        XCTAssertEqual(controller.messages.count, 1, "only the local message should remain")
+        XCTAssertEqual(controller.messages.first?.messageBody, "Your order is confirmed!")
+    }
+
+    func test_handoffThatCompletesInTime_disarmsBothCaps() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService,
+                                        handoffTurnTimeout: 0.3, handoffFirstChunkTimeout: 0.2)
+
+        var completions: [ConciergeError?] = []
+        _ = controller.handleDataHandoff(routingHint: "prompt-turn", xdmFields: [:]) { error in
+            completions.append(error)
+        }
+
+        spinUntil(!completions.isEmpty)
+        XCTAssertEqual(completions.count, 1)
+
+        // Outlive both caps: a disarmed timer must not fire a second, spurious completion.
+        spinUntil(timeout: 0.8, false)
+        XCTAssertEqual(completions.count, 1, "the caps must be disarmed once the turn completes")
+        XCTAssertEqual(fakeService.cancelActiveStreamCallCount, 0,
+                       "a turn that finished on time must not be cancelled")
     }
 
     func test_streaming_success_sets_idle_marks_shouldSpeak_and_attaches_sources() {
@@ -639,7 +1822,7 @@ final class ChatControllerTests: XCTestCase {
 
         controller.applyTextChange("hi")
         controller.sendMessage(isUser: true)
-        spinUntil(controller.chatState == .error(.networkFailure))
+        spinUntil(controller.chatState == .idle)
 
         let errorEvents = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.ERROR_OCCURRED }
         XCTAssertEqual(errorEvents.count, 1)
@@ -692,6 +1875,35 @@ final class ChatControllerTests: XCTestCase {
         let completedCount = dispatchedEvents.filter { $0.name == ConciergeConstants.TrackingEvent.Name.RESPONSE_COMPLETED }.count
         XCTAssertEqual(startedCount, 1, "responseStarted should fire even when message is empty but cards are present")
         XCTAssertEqual(completedCount, 1, "responseCompleted should remain paired with responseStarted")
+    }
+
+    /// A cards-only response has nothing to put in the streaming text bubble, so that placeholder
+    /// must be dropped rather than left behind as an empty agent message above the carousel.
+    func test_streaming_cards_only_leavesNoEmptyTextBubble() {
+        let fakeService = MockChatService(configuration: mockConciergeConfiguration)
+        let element = makeProductElement(id: "prod-1", name: "Widget Pro", price: "$9.99")
+        fakeService.plannedChunks = [
+            makePayloadWithProducts(state: ConciergeConstants.StreamState.COMPLETED, elements: [element], message: nil)
+        ]
+        let controller = makeController(configuration: mockConciergeConfiguration, service: fakeService)
+
+        controller.applyTextChange("show cards")
+        controller.sendMessage(isUser: true)
+        spinUntil(controller.chatState == .idle)
+
+        let emptyAgentBubbles = controller.messages.filter { message in
+            guard case .basic(let isUserMessage) = message.template, !isUserMessage else { return false }
+            return (message.messageBody ?? "").isEmpty
+        }
+        XCTAssertTrue(emptyAgentBubbles.isEmpty,
+                      "Expected no empty agent bubble for a cards-only response, found \(emptyAgentBubbles.count)")
+
+        let hasCard = controller.messages.contains { message in
+            if case .productCard = message.template { return true }
+            if case .carouselGroup = message.template { return true }
+            return false
+        }
+        XCTAssertTrue(hasCard, "The cards themselves must still be rendered")
     }
 
     func test_trackPromptSuggestionClicked_dispatches_event() {
@@ -785,7 +1997,7 @@ final class ChatControllerTests: XCTestCase {
 
         controller.applyTextChange("hi")
         controller.sendMessage(isUser: true)
-        spinUntil(controller.chatState == .idle || controller.chatState == .error(.networkFailure))
+        spinUntil(controller.chatState == .idle)
     }
 
     func test_trackChatOpened_dispatches_event() {
@@ -894,9 +2106,117 @@ final class ChatControllerTests: XCTestCase {
         XCTAssertEqual(events.first?.data?[ConciergeConstants.TrackingEvent.EventData.Key.URL] as? String, "https://example.com/terms")
     }
 
+    // Feedback identityMap Forwarding Tests
+
+    /// Appends a completed message with a payload so `sendFeedbackFor` can act on it; returns its id.
+    private func appendFeedbackEligibleMessage(to controller: ChatController, conversationId: String = "conv-1", interactionId: String = "int-1") -> UUID {
+        let message = Message(
+            template: .basic(isUserMessage: false),
+            messageBody: "Hello",
+            feedbackEligible: true,
+            payload: makePayload(state: ConciergeConstants.StreamState.COMPLETED, message: "Hello", conversationId: conversationId, interactionId: interactionId)
+        )
+        controller.messages.append(message)
+        return message.id
+    }
+
+    func test_sendFeedbackFor_withFullIdentityMap_forwardsAllNamespacesVerbatim() {
+        let identityMap: [String: Any] = [
+            "ECID": [["id": "ecid-1", "authenticatedState": "ambiguous", "primary": false]],
+            "hashedEmail": [["id": "hashed-email-1", "authenticatedState": "authenticated", "primary": true]],
+            "CRMID": [["id": "crm-1"]]
+        ]
+        let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: identityMap, surfaces: ["web://test"])
+        let fakeService = MockChatService(configuration: configuration)
+        let controller = makeController(configuration: configuration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(messageId: messageId, with: FeedbackPayload(sentiment: .positive, selectedOptions: [], notes: ""))
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+        XCTAssertNotNil(forwardedIdentityMap)
+
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
+        XCTAssertEqual(ecidEntries?.first?["authenticatedState"] as? String, "ambiguous")
+        XCTAssertEqual(ecidEntries?.first?["primary"] as? Bool, false)
+
+        let hashedEmailEntries = forwardedIdentityMap?["hashedEmail"] as? [[String: Any]]
+        XCTAssertEqual(hashedEmailEntries?.first?["id"] as? String, "hashed-email-1")
+        XCTAssertEqual(hashedEmailEntries?.first?["authenticatedState"] as? String, "authenticated")
+        XCTAssertEqual(hashedEmailEntries?.first?["primary"] as? Bool, true)
+
+        let crmEntries = forwardedIdentityMap?["CRMID"] as? [[String: Any]]
+        XCTAssertEqual(crmEntries?.first?["id"] as? String, "crm-1")
+    }
+
+    func test_sendFeedbackFor_withEcidOnlyIdentityMap_stillForwardsEcid() {
+        // Regression: ECID-only identityMap (as before this change) still reaches the endpoint
+        let identityMap: [String: Any] = ["ECID": [["id": "ecid-1"]]]
+        let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: identityMap, surfaces: ["web://test"])
+        let fakeService = MockChatService(configuration: configuration)
+        let controller = makeController(configuration: configuration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(messageId: messageId, with: FeedbackPayload(sentiment: .negative, selectedOptions: [], notes: ""))
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
+    }
+
+    func test_sendFeedbackFor_withNilIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given
+        let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: nil, surfaces: ["web://test"])
+        let fakeService = MockChatService(configuration: configuration)
+        let controller = makeController(configuration: configuration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(messageId: messageId, with: FeedbackPayload(sentiment: .positive, selectedOptions: [], notes: ""))
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
+    }
+
+    func test_sendFeedbackFor_withUnserializableIdentityMap_fallsBackToEcidOnlyMap() {
+        // Given: identityMap contains a value JSONSerialization can't encode (NaN)
+        let configuration = ConciergeConfiguration(ecid: "ecid-1", identityMap: ["ECID": Double.nan], surfaces: ["web://test"])
+        let fakeService = MockChatService(configuration: configuration)
+        let controller = makeController(configuration: configuration, service: fakeService)
+        let messageId = appendFeedbackEligibleMessage(to: controller)
+
+        controller.sendFeedbackFor(messageId: messageId, with: FeedbackPayload(sentiment: .positive, selectedOptions: [], notes: ""))
+        spinUntil(fakeService.sendFeedbackCallCount == 1)
+
+        let xdm = fakeService.lastFeedbackData?[ConciergeConstants.Request.Keys.XDM] as? [String: Any]
+        let forwardedIdentityMap = xdm?[ConciergeConstants.Request.Keys.IDENTITY_MAP] as? [String: Any]
+
+        // Then
+        let ecidEntries = forwardedIdentityMap?["ECID"] as? [[String: Any]]
+        XCTAssertEqual(ecidEntries?.first?["id"] as? String, "ecid-1")
+    }
+
     // MARK: - Helpers
-    private func makeController(configuration: ConciergeConfiguration, service: MockChatService, capturer: MockSpeechCapturer? = nil, dispatch: ((_ event: Event) -> Void)? = nil) -> ChatController {
-        ChatController(configuration: configuration, chatService: service, speechCapturer: capturer, speaker: NoopSpeaker(), dispatch: dispatch)
+    private func makeController(
+        configuration: ConciergeConfiguration,
+        service: MockChatService,
+        capturer: MockSpeechCapturer? = nil,
+        dispatch: ((_ event: Event) -> Void)? = nil,
+        handoffTurnTimeout: TimeInterval = ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT,
+        handoffFirstChunkTimeout: TimeInterval = ConciergeConstants.Request.DATA_HANDOFF_FIRST_CHUNK_TIMEOUT,
+        appState: ConciergeAppState = .shared,
+        backgroundRecoveryMaxAge: TimeInterval = ConciergeConstants.Session.TTL_SECONDS
+    ) -> ChatController {
+        ChatController(configuration: configuration, chatService: service, speechCapturer: capturer, speaker: NoopSpeaker(), dispatch: dispatch, handoffTurnTimeout: handoffTurnTimeout, handoffFirstChunkTimeout: handoffFirstChunkTimeout, appState: appState, backgroundRecoveryMaxAge: backgroundRecoveryMaxAge)
     }
 
     private func makePayload(state: String, message: String? = nil, sources: [Source]? = nil, conversationId: String? = nil, interactionId: String? = nil) -> ConversationPayload {
@@ -970,5 +2290,13 @@ final class ChatControllerTests: XCTestCase {
         while !predicate() && Date() < end {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
+    }
+
+    private func postAppBackgroundNotification() {
+        NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    }
+
+    private func postAppForegroundNotification() {
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
     }
 }

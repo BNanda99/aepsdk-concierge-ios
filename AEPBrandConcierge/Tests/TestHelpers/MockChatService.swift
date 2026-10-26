@@ -17,11 +17,19 @@ final class MockChatService: ConciergeChatService {
     var plannedError: ConciergeError? = nil
     var shouldCallComplete: Bool = true
     private var pendingOnComplete: ((ConciergeError?) -> Void)? = nil
+    private var pendingOnChunk: ((ConversationPayload) -> Void)? = nil
 
     // Captures for the feedback path
     private(set) var sendFeedbackCallCount = 0
     private(set) var lastFeedbackData: [String: Any]? = nil
     private(set) var lastFeedbackToken: String? = nil
+
+    // Captures for the chat path
+    private(set) var streamChatCallCount = 0
+    private(set) var lastQuery: String? = nil
+    private(set) var lastExtraXDMFields: [String: Any]? = nil
+    private(set) var lastSessionID: String? = nil
+    var onStreamChat: (() -> Void)?
 
     override func sendFeedback(data: [String: Any], token: String?) {
         sendFeedbackCallCount += 1
@@ -29,7 +37,13 @@ final class MockChatService: ConciergeChatService {
         lastFeedbackToken = token
     }
 
-    override func streamChat(_ query: String, token: String?, onChunk: @escaping (ConversationPayload) -> Void, onComplete: @escaping (ConciergeError?) -> Void) {
+    override func streamChat(_ query: String, token: String?, extraXDMFields: [String: Any]? = nil, sessionID: String? = nil, onChunk: @escaping (ConversationPayload) -> Void, onComplete: @escaping (ConciergeError?) -> Void) {
+        streamChatCallCount += 1
+        lastQuery = query
+        lastExtraXDMFields = extraXDMFields
+        lastSessionID = sessionID
+        onStreamChat?()
+
         // Immediately emit planned chunks then complete
         for chunk in plannedChunks {
             onChunk(chunk)
@@ -37,11 +51,35 @@ final class MockChatService: ConciergeChatService {
         if shouldCallComplete {
             onComplete(plannedError)
         } else {
+            pendingOnChunk = onChunk
             pendingOnComplete = onComplete
         }
     }
 
+    /// Streams a chunk on a turn being held open, the way a slow-but-alive backend would.
+    func emitChunk(_ payload: ConversationPayload) {
+        pendingOnChunk?(payload)
+    }
+
+    private(set) var cancelActiveStreamCallCount = 0
+
+    /// Whether cancelling reports a completion. True mirrors the real delegate when a `dataTask` is
+    /// in flight: the cancellation surfaces as an ordinary connection failure. Set false to model
+    /// the case the real service also has - `cancelActiveStream()` is `dataTask?.cancel()`, so with
+    /// nothing in flight it reports nothing at all, and the caller gets no failure path to unwind
+    /// through.
+    var completesOnCancel = true
+
+    override func cancelActiveStream() {
+        cancelActiveStreamCallCount += 1
+        pendingOnChunk = nil
+        guard completesOnCancel, let complete = pendingOnComplete else { return }
+        pendingOnComplete = nil
+        complete(.unreachable)
+    }
+
     func triggerCompletion() {
+        pendingOnChunk = nil
         guard let complete = pendingOnComplete else { return }
         pendingOnComplete = nil
         complete(plannedError)

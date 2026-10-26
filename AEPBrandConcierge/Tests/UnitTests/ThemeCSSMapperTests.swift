@@ -235,6 +235,60 @@ final class ThemeCSSMapperTests: XCTestCase {
         XCTAssertEqual(theme.layout.messagePadding.bottom, CGFloat(8))
         XCTAssertEqual(theme.layout.messagePadding.leading, CGFloat(16))
         XCTAssertEqual(theme.layout.messagePadding.trailing, CGFloat(16))
+        XCTAssertNil(theme.layout.agentMessagePadding)
+    }
+
+    func test_agentMessagePadding_defaultLayout_preservesLegacyPadding() {
+        let layout = ConciergeLayout()
+        XCTAssertNil(layout.agentMessagePadding)
+        XCTAssertEqual(layout.messagePadding, ConciergePadding(vertical: 8, horizontal: 16))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true),
+                       ConciergePadding(vertical: 8, horizontal: 0))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: false), layout.messagePadding)
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: true, hasAgentIcon: true), layout.messagePadding)
+    }
+
+    func test_messagePadding_existingCustomerTheme_preservesAgentAndUserPadding() {
+        var theme = ConciergeTheme()
+        CSSKeyMapper.apply(cssKey: "message-padding", cssValue: "10px 10px", to: &theme)
+
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true),
+                       ConciergePadding(vertical: 10, horizontal: 0))
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: true, hasAgentIcon: true),
+                       ConciergePadding(all: 10))
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: false),
+                       ConciergePadding(all: 10))
+    }
+
+    func test_agentMessagePadding_mapsAllEdgesWithoutChangingUserPadding() {
+        var theme = ConciergeTheme()
+        CSSKeyMapper.apply(cssKey: "message-padding", cssValue: "10px", to: &theme)
+        CSSKeyMapper.apply(cssKey: "agent-message-padding", cssValue: "2px 4px 6px 8px", to: &theme)
+
+        let expected = ConciergePadding(top: 2, bottom: 6, leading: 8, trailing: 4)
+        XCTAssertEqual(theme.layout.agentMessagePadding, expected)
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true), expected)
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: false), expected)
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: true, hasAgentIcon: true), ConciergePadding(all: 10))
+        XCTAssertEqual(theme.layout.resolvedMessagePadding(isUserMessage: true, hasAgentIcon: false), ConciergePadding(all: 10))
+    }
+
+    func test_agentMessagePadding_explicitZeroOverridesAndCanBeCleared() {
+        var layout = ConciergeLayout(messagePadding: ConciergePadding(all: 10),
+                                     agentMessagePadding: ConciergePadding(all: 0))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true), ConciergePadding(all: 0))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: false), ConciergePadding(all: 0))
+
+        layout.agentMessagePadding = nil
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true),
+                       ConciergePadding(vertical: 10, horizontal: 0))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: false), ConciergePadding(all: 10))
+    }
+
+    func test_messagePadding_asymmetricVerticalPaddingIsPreservedBesideIcon() {
+        let layout = ConciergeLayout(messagePadding: ConciergePadding(top: 2, bottom: 6, leading: 8, trailing: 4))
+        XCTAssertEqual(layout.resolvedMessagePadding(isUserMessage: false, hasAgentIcon: true),
+                       ConciergePadding(top: 2, bottom: 6, leading: 0, trailing: 0))
     }
     
     func test_inputBoxShadow_mapsToLayout() {
@@ -279,7 +333,19 @@ final class ThemeCSSMapperTests: XCTestCase {
         XCTAssertNotNil(theme.layout.messageMaxWidth)
         XCTAssertEqual(theme.layout.messageMaxWidth!, 768, accuracy: 0.0001)
     }
-    
+
+    func test_markdownBlockSpacing_mapsToLayout() {
+        var theme = ConciergeTheme()
+
+        CSSKeyMapper.apply(
+            cssKey: "markdown-block-spacing",
+            cssValue: "19.09375px",
+            to: &theme
+        )
+
+        XCTAssertEqual(theme.layout.markdownBlockSpacing ?? -1, 19.09375, accuracy: 0.0001)
+    }
+
     func test_citationsTextFontWeight_mapsToLayout() {
         // Given
         var theme = ConciergeTheme()
@@ -592,6 +658,38 @@ final class ThemeCSSMapperTests: XCTestCase {
         XCTAssertEqual(theme.colors.productCardCtaButton.text.color.toHexString(), "#FFFFFF")
     }
 
+    func test_productCardSecondaryCtaButtonBackgroundColor_mapsToSecondaryColors() {
+        var theme = ConciergeTheme()
+
+        CSSKeyMapper.apply(cssKey: "product-card-secondary-cta-button-background-color", cssValue: "#101820", to: &theme)
+
+        XCTAssertEqual(theme.colors.productCardSecondaryCtaButton.background.color.toHexString(), "#101820")
+    }
+
+    func test_productCardSecondaryCtaButtonTextColor_mapsToSecondaryColors() {
+        var theme = ConciergeTheme()
+
+        CSSKeyMapper.apply(cssKey: "product-card-secondary-cta-button-text-color", cssValue: "#BB5811", to: &theme)
+
+        XCTAssertEqual(theme.colors.productCardSecondaryCtaButton.text.color.toHexString(), "#BB5811")
+    }
+
+    func test_productCardSecondaryCtaButtonBorderColor_mapsToSecondaryColors() {
+        var theme = ConciergeTheme()
+
+        CSSKeyMapper.apply(cssKey: "product-card-secondary-cta-button-border-color", cssValue: "#123456", to: &theme)
+
+        XCTAssertEqual(theme.colors.productCardSecondaryCtaButton.border.color.toHexString(), "#123456")
+    }
+
+    func test_productCardSecondaryCtaButtonBorderWidth_mapsToLayout() {
+        var theme = ConciergeTheme()
+
+        CSSKeyMapper.apply(cssKey: "product-card-secondary-cta-button-border-width", cssValue: "2px", to: &theme)
+
+        XCTAssertEqual(theme.layout.productCardSecondaryCtaButtonBorderWidth, 2)
+    }
+
     // MARK: - Product Card Layout Mapping Tests
 
     func test_productCardTitleFontSize_mapsToLayout() {
@@ -746,6 +844,52 @@ final class ThemeCSSMapperTests: XCTestCase {
 
         // Then
         XCTAssertEqual(theme.layout.productCardMaxHeight, 360)
+    }
+
+    /// Unset by default, like every other optional layout token, leaving the card to apply its own
+    /// two-line default. A theme that never sets the key therefore clamps exactly as it did before
+    /// the key existed.
+    func test_productCardDescriptionMaxLines_defaultsToUnset() {
+        XCTAssertNil(ConciergeTheme().layout.productCardDescriptionMaxLines)
+    }
+
+    func test_productCardDescriptionMaxLines_mapsToLayout() {
+        // Given
+        var theme = ConciergeTheme()
+
+        // When
+        CSSKeyMapper.apply(cssKey: "product-card-description-max-lines", cssValue: "6", to: &theme)
+
+        // Then
+        XCTAssertEqual(theme.layout.productCardDescriptionMaxLines, 6)
+    }
+
+    /// `none` is not a supported clamp value, so it leaves the token unset and the card keeps its
+    /// own default rather than rendering an unbounded description.
+    func test_productCardDescriptionMaxLines_none_mapsToNil() {
+        // Given
+        var theme = ConciergeTheme()
+
+        // When
+        CSSKeyMapper.apply(cssKey: "product-card-description-max-lines", cssValue: "none", to: &theme)
+
+        // Then
+        XCTAssertNil(theme.layout.productCardDescriptionMaxLines)
+    }
+
+    /// Zero, negatives and junk are all meaningless as a line clamp; each must leave the token
+    /// unset rather than being passed through, since a `lineLimit(0)` renders nothing at all.
+    func test_productCardDescriptionMaxLines_invalidValues_mapToNil() {
+        for value in ["0", "-3", "abc", ""] {
+            // Given
+            var theme = ConciergeTheme()
+
+            // When
+            CSSKeyMapper.apply(cssKey: "product-card-description-max-lines", cssValue: value, to: &theme)
+
+            // Then
+            XCTAssertNil(theme.layout.productCardDescriptionMaxLines, "expected nil for \(value.isEmpty ? "empty string" : value)")
+        }
     }
 
     func test_productImageWidth_mapsToLayout() {
@@ -1271,4 +1415,3 @@ final class ThemeCSSMapperTests: XCTestCase {
         XCTAssertNil(theme.layout.thinkingDotVerticalAlignment)
     }
 }
-

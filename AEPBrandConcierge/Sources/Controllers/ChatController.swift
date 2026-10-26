@@ -16,6 +16,31 @@ import Combine
 import AEPCore
 import AEPServices
 
+private final class MainActorCallbackSequencer {
+    private let lock = NSLock()
+    private var lastTask: Task<Void, Never>?
+
+    func enqueue(_ operation: @escaping @MainActor () -> Void) {
+        lock.lock()
+        let previousTask = lastTask
+        lastTask = Task { @MainActor in
+            await previousTask?.value
+            operation()
+        }
+        lock.unlock()
+    }
+}
+
+/// Everything needed to resend a background-interrupted typed turn once the app is foregrounded.
+private struct RecoveryRequest {
+    let query: String
+    let xdmFields: [String: Any]
+    let sessionID: String
+    /// The failure that triggered recovery; surfaced if the resend is skipped.
+    let error: ConciergeError
+    let attemptStartedAt: Date
+}
+
 /// Main controller orchestrating chat functionality.
 /// Manages messages, chat state, and coordinates between services.
 @MainActor
@@ -23,7 +48,7 @@ final class ChatController: ObservableObject {
     // MARK: - Published State
 
     @Published var messages: [Message] = []
-    @Published var chatState: ChatState = .idle
+    @Published private(set) var chatState: ChatState = .idle
     @Published var userScrollTick: Int = 0
     @Published var userMessageToScrollId: UUID?
     @Published var showPermissionDialog: Bool = false
@@ -32,6 +57,10 @@ final class ChatController: ObservableObject {
     /// Mirror of `inputController.state`, updated only on state transitions (not per-keystroke text
     /// changes). Lets views react to input state without observing `InputController` directly.
     @Published private(set) var composerState: InputState = .empty
+
+    /// Copy rendered into the transcript when a turn fails. Pushed in from the view's theme (see
+    /// `ChatView`) because the theme lives in the SwiftUI environment rather than on the session.
+    var networkErrorMessage: String = ConciergeCopy.defaultErrorNetwork
 
     // MARK: - Input Controller
 
@@ -44,57 +73,108 @@ final class ChatController: ObservableObject {
 
     private let LOG_TAG = "ChatController"
     private let chatService: ConciergeChatService
-    private let configuration: ConciergeConfiguration?
+    let configuration: ConciergeConfiguration?
     private let speechController: SpeechController
     private let dispatch: ((_ event: Event) -> Void)?
+    private let appState: ConciergeAppState
+    private(set) var lastTurnSessionID: String?
+    private let identityGeneration: Int
+    @Published private(set) var endedForIdentityReset = false
+    var conversationID: String? { messages.compactMap { $0.payload?.conversationId }.last }
+    private var identityReady: Bool {
+        !endedForIdentityReset && ConciergeIdentityBoundary.shared.admits(identityGeneration)
+    }
 
     private var welcomeMessagesLoaded: Bool = false
+
+    /// The turn currently in flight, or `nil` when the chat is idle. At most one exists at a time:
+    /// `ConciergeChatService` keeps a single `dataTask`/handler pair per instance, so a second
+    /// concurrent turn would strand the first one's completion.
+    ///
+    /// This is the controller's single source of truth for "is a turn running", and the only writer
+    /// of `chatState`. Chat state used to be assigned from every path that started or ended a turn,
+    /// and a path that ended one without assigning left the chat parked in `.processing` with a
+    /// dead composer - the failure mode behind several of this feature's bugs. Deriving it here
+    /// makes that state unreachable: there is nowhere left to end a turn without also going idle.
+    private var activeTurn: ChatTurn? {
+        didSet { chatState = activeTurn == nil ? .idle : .processing }
+    }
+
+    /// Injectable so tests can exercise the caps without waiting out the production values.
+    private let handoffFirstChunkTimeout: TimeInterval
+    private let handoffTurnTimeout: TimeInterval
+    /// Longest wait after which a background-interrupted turn is no longer resent. Injectable for tests.
+    private let backgroundRecoveryMaxAge: TimeInterval
+
     private var latestSources: [Source] = []
     private var latestLinkHints: [LinkHint] = []
     private var latestPromptSuggestions: [String] = []
     private var chatOpenTime: Date?
     private var cancellables = Set<AnyCancellable>()
+    private var foregroundRetryCancellable: AnyCancellable?
 
     // MARK: - Computed Properties
 
     var isRecording: Bool { inputState == .recording }
     var isProcessing: Bool { chatState == .processing }
-    var composerEditable: Bool { chatState != .processing }
-    var micEnabled: Bool { chatState == .idle }
-    var sendEnabled: Bool { chatState == .idle && inputController.data.canSend }
+    var composerEditable: Bool { identityReady && chatState != .processing }
+    var micEnabled: Bool { identityReady && chatState == .idle }
+    var sendEnabled: Bool { identityReady && chatState == .idle && inputController.data.canSend }
 
-    /// Whether at least one user message exists in the transcript.
-    var hasUserSentMessage: Bool {
+    /// Whether the transcript holds at least one real turn. Welcome content doesn't count.
+    ///
+    /// Deliberately not "has the *user* sent a message": a data handoff appends only agent-styled
+    /// messages, so a checkout-driven conversation would otherwise still look untouched.
+    var hasConversationStarted: Bool {
         messages.contains { message in
-            if case .basic(let isUserMessage) = message.template {
-                return isUserMessage
+            switch message.template {
+            case .welcomeHeader, .welcomePromptSuggestion:
+                return false
+            default:
+                return true
             }
-            return false
         }
     }
 
     // MARK: - Initialization
 
-    init(configuration: ConciergeConfiguration, speechCapturer: SpeechCapturing?, speaker: TextSpeaking?, dispatch: ((_ event: Event) -> Void)? = nil, urlSessionConfiguration: URLSessionConfiguration = .default) {
+    init(configuration: ConciergeConfiguration, speechCapturer: SpeechCapturing?, speaker: TextSpeaking?, dispatch: ((_ event: Event) -> Void)? = nil, urlSessionConfiguration: URLSessionConfiguration = .default, identityGeneration: Int? = nil, appState: ConciergeAppState = .shared) {
+        let generation = identityGeneration ?? ConciergeIdentityBoundary.shared.synchronized {
+            ConciergeIdentityBoundary.shared.generation
+        }
+        self.identityGeneration = generation
         self.configuration = configuration
         self.chatService = ConciergeChatService(configuration: configuration, urlSessionConfiguration: urlSessionConfiguration)
-        self.speechController = SpeechController(capturer: speechCapturer, speaker: speaker)
+        self.speechController = SpeechController(capturer: speechCapturer, speaker: speaker, identityGeneration: generation)
         self.dispatch = dispatch
+        self.appState = appState
+        self.handoffTurnTimeout = ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT
+        self.handoffFirstChunkTimeout = ConciergeConstants.Request.DATA_HANDOFF_FIRST_CHUNK_TIMEOUT
+        self.backgroundRecoveryMaxAge = ConciergeConstants.Session.TTL_SECONDS
 
         configureSpeech()
         observeComposerState()
+        observeAppState()
     }
 
     #if DEBUG
     // Internal for testing only
-    init(configuration: ConciergeConfiguration?, chatService: ConciergeChatService, speechCapturer: SpeechCapturing?, speaker: TextSpeaking?, dispatch: ((_ event: Event) -> Void)? = nil) {
+    init(configuration: ConciergeConfiguration?, chatService: ConciergeChatService, speechCapturer: SpeechCapturing?, speaker: TextSpeaking?, dispatch: ((_ event: Event) -> Void)? = nil, handoffTurnTimeout: TimeInterval = ConciergeConstants.Request.DATA_HANDOFF_TURN_TIMEOUT, handoffFirstChunkTimeout: TimeInterval = ConciergeConstants.Request.DATA_HANDOFF_FIRST_CHUNK_TIMEOUT, appState: ConciergeAppState = .shared, backgroundRecoveryMaxAge: TimeInterval = ConciergeConstants.Session.TTL_SECONDS) {
+        self.identityGeneration = ConciergeIdentityBoundary.shared.synchronized {
+            ConciergeIdentityBoundary.shared.generation
+        }
         self.configuration = configuration
         self.chatService = chatService
-        self.speechController = SpeechController(capturer: speechCapturer, speaker: speaker)
+        self.speechController = SpeechController(capturer: speechCapturer, speaker: speaker, identityGeneration: identityGeneration)
         self.dispatch = dispatch
+        self.appState = appState
+        self.handoffTurnTimeout = handoffTurnTimeout
+        self.handoffFirstChunkTimeout = handoffFirstChunkTimeout
+        self.backgroundRecoveryMaxAge = backgroundRecoveryMaxAge
 
         configureSpeech()
         observeComposerState()
+        observeAppState()
     }
     #endif
 
@@ -108,7 +188,17 @@ final class ChatController: ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func observeAppState() {
+        appState.statePublisher
+            .sink { [weak self] state in
+                guard let self = self, state == .background else { return }
+                self.activeTurn?.noteAppBackgrounded()
+            }
+            .store(in: &cancellables)
+    }
+
     func applyTextChange(_ newText: String) {
+        guard identityReady else { return }
         inputController.applyTextChange(newText)
     }
 
@@ -126,6 +216,7 @@ final class ChatController: ObservableObject {
     }
 
     func toggleMic(currentSelectionLocation: Int) {
+        guard identityReady else { return }
         if isRecording { completeMic() } else { startRecording(currentSelectionLocation: currentSelectionLocation) }
     }
 
@@ -146,16 +237,18 @@ final class ChatController: ObservableObject {
         inputController.apply(.recordingComplete)
         speechController.endCapture { [weak self] transcript, _ in
             Task { @MainActor in
+                guard let self, self.identityReady else { return }
                 if let transcript = transcript, !transcript.isEmpty {
-                    self?.inputController.apply(.transcriptionComplete(transcript))
+                    self.inputController.apply(.transcriptionComplete(transcript))
                 } else {
-                    self?.inputController.apply(.transcriptionError("empty transcript"))
+                    self.inputController.apply(.transcriptionError("empty transcript"))
                 }
             }
         }
     }
 
     func startRecording(currentSelectionLocation: Int) {
+        guard identityReady else { return }
         guard chatState == .idle else {
             Log.warning(label: LOG_TAG, "startRecording ignored. Expected chatState to be 'idle', but was '\(chatState)'.")
             return
@@ -176,7 +269,7 @@ final class ChatController: ObservableObject {
             Log.debug(label: LOG_TAG, "Requesting speech and microphone permissions for the first time.")
             speechController.requestPermissions { [weak self] in
                 Task { @MainActor in
-                    guard let self = self else { return }
+                    guard let self = self, self.identityReady else { return }
                     // After user responds to system prompts, check if permissions were granted
                     if self.speechController.isAvailable {
                         Log.debug(label: self.LOG_TAG, "Permissions granted. Starting recording.")
@@ -203,8 +296,10 @@ final class ChatController: ObservableObject {
     }
 
     private func beginCaptureSession(currentSelectionLocation: Int) {
+        guard identityReady else { return }
         speechController.setAudioLevelHandler { [weak self] level in
-            self?.audioLevel = level
+            guard let self, self.identityReady else { return }
+            self.audioLevel = level
         }
         speechController.setSilenceHandler { [weak self] in
             self?.completeMic()
@@ -226,6 +321,16 @@ final class ChatController: ObservableObject {
     // MARK: - Message Sending
 
     func sendMessage(isUser: Bool) {
+        ConciergeIdentityBoundary.shared.synchronized {
+            sendAdmittedMessage(isUser: isUser)
+        }
+    }
+
+    private func sendAdmittedMessage(isUser: Bool) {
+        guard identityReady else {
+            Log.warning(label: LOG_TAG, "Message rejected because the conversation ended or identity reset is pending.")
+            return
+        }
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             Log.warning(label: LOG_TAG, "sendMessage ignored. Expected non-empty text, but was empty.")
@@ -246,19 +351,219 @@ final class ChatController: ObservableObject {
 
         if isUser {
             // Store the user message ID first
-            userMessageToScrollId = newMessage.id
-            // Defer tick increment to ensure ID is published first
-            DispatchQueue.main.async {
-                self.userScrollTick &+= 1
-            }
+            scrollToTop(messageId: newMessage.id)
         }
 
         if isUser {
-            dispatchTrackingEvent(.querySubmitted(query: text))
-            chatState = .processing
-            streamAgentResponse(for: text)
+            // Reads the store synchronously (no async work involved) so the same snapshot
+            // `streamAgentResponse` sends over the wire moments later is what's visible in
+            // Assurance on this event - the SDK's chat turns bypass the Event Hub entirely, so
+            // this is the only place the outbound XDM is ever observable outside local debug logs.
+            let sessionID = chatService.resolveSessionID()
+            let xdmContext = ConciergeXDMContextStore.shared.snapshot(for: sessionID)
+            dispatchTrackingEvent(.querySubmitted(query: text, xdmFields: xdmContext))
+            streamAgentResponse(for: text, heldXDMFields: xdmContext, sessionID: sessionID)
         } else {
             clearState()
+        }
+    }
+
+    /// Forwards an app-originated data-handoff turn (e.g. a checkout outcome) to Brand Concierge.
+    /// The routing hint never renders; only `localMessage` and the eventual reply do. The turn is
+    /// scrolled to the top like `sendMessage` does, since a handoff is triggered from app UI rather
+    /// than the composer and the transcript would otherwise stay where the user left it.
+    ///
+    /// Returns `false` without starting anything when a turn is already in flight:
+    /// `ConciergeChatService` keeps a single `dataTask`/handler pair per instance, so a second
+    /// concurrent turn would strand the first one's completion. `.error` is *not* in flight.
+    @discardableResult
+    func handleDataHandoff(routingHint: String,
+                           xdmFields: [String: Any],
+                           localMessage: String? = nil,
+                           completion: ((ConciergeError?) -> Void)? = nil) -> Bool {
+        ConciergeIdentityBoundary.shared.synchronized {
+            handleAdmittedDataHandoff(routingHint: routingHint, xdmFields: xdmFields,
+                                     localMessage: localMessage, completion: completion)
+        }
+    }
+
+    private func handleAdmittedDataHandoff(routingHint: String,
+                                           xdmFields: [String: Any],
+                                           localMessage: String?,
+                                           completion: ((ConciergeError?) -> Void)?) -> Bool {
+        guard identityReady else {
+            Log.warning(label: LOG_TAG, "Data handoff rejected because identity reset is pending.")
+            completion?(.unknown)
+            return true
+        }
+        guard activeTurn == nil else {
+            Log.warning(label: LOG_TAG, "handleDataHandoff ignored. A Concierge turn is already in progress.")
+            return false
+        }
+
+        var anchorMessageId: UUID?
+        if let localMessage, !localMessage.isEmpty {
+            let message = Message(template: .basic(isUserMessage: false), messageBody: localMessage)
+            messages.append(message)
+            anchorMessageId = message.id
+        }
+
+        let kind = TurnKind.handoff(noResponse: handoffFirstChunkTimeout, ceiling: handoffTurnTimeout)
+        let turn = streamAgentResponse(for: routingHint, extraXDMFields: xdmFields,
+                                       kind: kind, completion: completion)
+
+        // `streamAgentResponse` appends its placeholder synchronously, so with no local message
+        // that placeholder is the turn's anchor instead.
+        scrollToTop(messageId: anchorMessageId ?? turn.placeholderId)
+        return true
+    }
+
+    /// Ends `turn` because one of its deadlines elapsed.
+    ///
+    /// The unwind must not depend on the cancellation below. Until the turn's auth token resolves
+    /// there is no `dataTask` to cancel, and cancelling nothing reports nothing - which left the
+    /// chat parked in `.processing` with a dead composer. Unwinding here directly makes it
+    /// unconditional, and dropping the turn drops the late callbacks that would otherwise revive it.
+    private func cap(_ turn: ChatTurn, after interval: TimeInterval, reason: String) {
+        guard activeTurn === turn else { return }
+        Log.warning(label: LOG_TAG, "Data handoff turn \(reason).")
+
+        turn.resolve(.timeout(Int(interval)))
+        discardPlaceholder(of: turn)
+        endTurn(turn)
+        chatService.cancelActiveStream()
+    }
+
+    private func retryAfterForeground(_ turn: ChatTurn, _ request: RecoveryRequest) {
+        discardPlaceholder(of: turn)
+        guard appState.state == .background else {
+            Log.debug(label: LOG_TAG, "Background recovery scheduled while app is foregrounded; starting resend now.")
+            startRecovery(turn, request)
+            return
+        }
+
+        Log.debug(label: LOG_TAG, "Background recovery scheduled; waiting for app foreground before resending.")
+        foregroundRetryCancellable?.cancel()
+        foregroundRetryCancellable = appState.statePublisher
+            .filter { $0 == .foreground }
+            .prefix(1)
+            .sink { [weak self, weak turn] _ in
+                Task { @MainActor in
+                    guard let self = self, let turn = turn else { return }
+                    self.startRecovery(turn, request)
+                }
+            }
+    }
+
+    private func startRecovery(_ turn: ChatTurn, _ request: RecoveryRequest) {
+        guard identityReady, activeTurn === turn, !turn.isResolved else { return }
+        foregroundRetryCancellable?.cancel()
+        foregroundRetryCancellable = nil
+
+        // Past the session TTL the backend session has expired, and the user has likely moved on
+        // from the question. Report the original failure instead of answering it out of context.
+        guard Date().timeIntervalSince(request.attemptStartedAt) < backgroundRecoveryMaxAge else {
+            Log.warning(label: LOG_TAG, "Background recovery skipped because the session expired while waiting.")
+            dispatchTrackingEvent(.errorOccurred(errorMessage: request.error.localizedDescription))
+            messages.append(Message(template: .basic(isUserMessage: false), messageBody: networkErrorMessage))
+            turn.resolve(request.error)
+            endTurn(turn)
+            return
+        }
+
+        Log.debug(label: LOG_TAG, "Resending one background-interrupted typed chat turn.")
+        turn.resolve(nil)
+        latestSources = []
+        latestLinkHints = []
+        latestPromptSuggestions = []
+        // The resend is a new request with its own interaction ID, so it reports its own
+        // responseStarted/responseCompleted pair rather than completing the failed attempt's.
+        _ = streamAgentResponse(for: request.query, heldXDMFields: request.xdmFields, sessionID: request.sessionID,
+                                kind: .typed, allowsBackgroundRecovery: false)
+    }
+
+    /// Removes `turn`'s streaming placeholder from the transcript, if it is still there.
+    ///
+    /// Looked up by id: the transcript shifts under a turn as cards and suggestions are appended,
+    /// so an index captured when the turn started may no longer point at its own message.
+    private func discardPlaceholder(of turn: ChatTurn) {
+        guard let index = messages.firstIndex(where: { $0.id == turn.placeholderId }) else { return }
+        messages.remove(at: index)
+    }
+
+    /// Releases `turn` if it is still the live one, returning the chat to idle.
+    ///
+    /// Guarded by identity so a superseded turn's late callback cannot clear the state belonging to
+    /// whichever turn is running now.
+    private func endTurn(_ turn: ChatTurn) {
+        guard activeTurn === turn else { return }
+        if foregroundRetryCancellable != nil {
+            Log.debug(label: LOG_TAG, "Cancelling pending background recovery because the chat turn ended.")
+        }
+        foregroundRetryCancellable?.cancel()
+        foregroundRetryCancellable = nil
+        clearState()
+    }
+
+    #if DEBUG
+    /// Test seam: renders a given chat state without running a real turn.
+    ///
+    /// Production has exactly one writer of `chatState` - see `activeTurn` - which is the point of
+    /// the property being `private(set)`. View snapshots still need to draw a state directly, and
+    /// this makes that an explicit, test-only exception rather than a hole in the invariant.
+    func setChatStateForTesting(_ state: ChatState) {
+        chatState = state
+    }
+    #endif
+
+    /// Abandons the turn in flight, if any, returning the chat to idle.
+    ///
+    /// Replaces a direct `chatState = .idle` write from the view layer. Forcing the state flag
+    /// alone left the turn running: it went on streaming into a transcript the composer was now
+    /// live against, and its caller was never told. Ending the turn properly reports it, removes
+    /// its placeholder and releases the request.
+    ///
+    /// Discarding the placeholder is deliberate for *both* turn kinds, not just `.handoff`. A
+    /// typed turn's placeholder may already hold partial text, and that text is an answer to a
+    /// question the chat is no longer in a position to finish - leaving a truncated reply behind
+    /// with no indication it was cut short reads as a complete answer. Note this is currently
+    /// unreachable: the only caller is `ChatView`'s `onToggleMode`, and `ChatTopBar` never invokes
+    /// it because its `body` doesn't render the toggle.
+    func abandonActiveTurn() {
+        guard let turn = activeTurn else { return }
+        turn.resolve(.unknown)
+        discardPlaceholder(of: turn)
+        endTurn(turn)
+        chatService.cancelActiveStream()
+    }
+
+    func endConversationForIdentityReset() {
+        endedForIdentityReset = true
+        abandonActiveTurn()
+        chatService.endFeedbackForIdentityReset()
+        chatService.invalidateTransportForIdentityReset()
+        speechController.stopSpeaking()
+        speechController.endCapture { _, _ in }
+        inputController.apply(.reset)
+        messages = []
+        latestSources = []
+        latestLinkHints = []
+        latestPromptSuggestions = []
+        lastTurnSessionID = nil
+        userMessageToScrollId = nil
+        showPermissionDialog = false
+        audioLevel = 0
+    }
+
+    /// Scrolls the transcript so `messageId` sits at the top, leaving the rest of the screen for
+    /// the response that follows.
+    ///
+    /// The tick is bumped on the next main-queue pass so the id is published *before* the change
+    /// `MessageListView` observes; a same-pass update would scroll to the previous turn's anchor.
+    private func scrollToTop(messageId: UUID) {
+        userMessageToScrollId = messageId
+        DispatchQueue.main.async {
+            self.userScrollTick &+= 1
         }
     }
 
@@ -267,7 +572,7 @@ final class ChatController: ObservableObject {
     /// Loads initial welcome header and examples if not already loaded.
     func loadWelcomeIfNeeded(theme: ConciergeTheme) async {
         // Prevent loading if already loaded OR if messages is not empty
-        guard !welcomeMessagesLoaded && messages.isEmpty else { return }
+        guard identityReady, !welcomeMessagesLoaded && messages.isEmpty else { return }
         welcomeMessagesLoaded = true
 
         // Prefer welcome content provided by the theme when available.
@@ -300,6 +605,10 @@ final class ChatController: ObservableObject {
     // MARK: - Feedback
 
     func sendFeedbackFor(messageId: UUID?, with feedbackPayload: FeedbackPayload) {
+        guard identityReady else {
+            Log.warning(label: LOG_TAG, "Feedback rejected because identity reset ended the conversation.")
+            return
+        }
         guard let messageId = messageId, let index = messages.firstIndex(where: { $0.id == messageId }) else {
             Log.debug(label: LOG_TAG, "Unable to send feedback, the message was not retrievable from the chat.")
             return
@@ -328,13 +637,8 @@ final class ChatController: ObservableObject {
         let feedbackEventData: [String: Any] = [
             ConciergeConstants.Request.Keys.XDM: [
                 ConciergeConstants.Request.Keys.EVENT_TYPE: ConciergeConstants.Request.EventType.CONVERSATION_FEEDBACK,
-                ConciergeConstants.Request.Keys.IDENTITY_MAP: [
-                    ConciergeConstants.Request.Keys.ECID: [
-                        [
-                            ConciergeConstants.Request.Keys.ID: configuration.ecid
-                        ]
-                    ]
-                ],
+                // Forward identityMap verbatim; falls back to an ECID-only map
+                ConciergeConstants.Request.Keys.IDENTITY_MAP: configuration.identityMapPayload,
                 ConciergeConstants.Request.Keys.CONVERSATION: [
                     ConciergeConstants.Request.Keys.Feedback.FEEDBACK: [
                         ConciergeConstants.Request.Keys.Feedback.SOURCE: ConciergeConstants.Request.Values.Feedback.END_USER,
@@ -359,7 +663,10 @@ final class ChatController: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             let token = await ConciergeAuthTokenResolver.shared.resolveToken()
-            self.chatService.sendFeedback(data: feedbackEventData, token: token)
+            ConciergeIdentityBoundary.shared.synchronized {
+                guard self.identityReady else { return }
+                self.chatService.sendFeedback(data: feedbackEventData, token: token)
+            }
         }
 
         dispatchTrackingEvent(.feedbackSubmitted(
@@ -437,31 +744,104 @@ final class ChatController: ObservableObject {
     private func configureSpeech() {
         speechController.configureForStreaming { [weak self] text in
             Task { @MainActor in
-                self?.inputController.apply(.streamingPartial(text))
+                guard let self, self.identityReady else { return }
+                self.inputController.apply(.streamingPartial(text))
             }
         }
     }
 
-    private func streamAgentResponse(for query: String) {
-        let streamingMessageIndex = messages.count
-        messages.append(Message(template: .basic(isUserMessage: false), messageBody: ""))
+    /// Starts a turn: appends its streaming placeholder, sends the query, and streams the reply
+    /// back into that placeholder. Returns the turn, which becomes the controller's `activeTurn`.
+    ///
+    /// `kind` decides the two ways turns differ - whether failures render, and whether the turn is
+    /// bounded. See `TurnKind`.
+    @discardableResult
+    private func streamAgentResponse(for query: String,
+                                     heldXDMFields: [String: Any]? = nil,
+                                     extraXDMFields: [String: Any]? = nil,
+                                     sessionID: String? = nil,
+                                     kind: TurnKind = .typed,
+                                     allowsBackgroundRecovery: Bool = true,
+                                     completion: ((ConciergeError?) -> Void)? = nil) -> ChatTurn {
+        let placeholder = Message(template: .basic(isUserMessage: false), messageBody: "")
+        messages.append(placeholder)
+
+        let turn = ChatTurn(placeholderId: placeholder.id,
+                            kind: kind,
+                            allowsBackgroundRecovery: allowsBackgroundRecovery,
+                            outcome: completion)
+        if appState.state == .background {
+            turn.noteAppBackgrounded()
+        }
+        activeTurn = turn
+
+        // Armed from submission, so it also bounds the auth-token wait below.
+        turn.armCeiling { [weak self] interval in
+            self?.cap(turn, after: interval, reason: "exceeded its wall-clock cap")
+        }
+
+        // Freeze the context before the asynchronous token-provider wait, so the request carries
+        // the same snapshot a typed turn already exposed in its query-submitted event.
+        let resolvedSessionID = sessionID ?? chatService.resolveSessionID()
+        lastTurnSessionID = resolvedSessionID
+        var mergedXDMFields = heldXDMFields ?? ConciergeXDMContextStore.shared.snapshot(for: resolvedSessionID)
+        if let extraXDMFields {
+            mergedXDMFields = ConciergeXDMContextStore.merging(extraXDMFields, over: mergedXDMFields)
+        }
 
         // Accumulators are used to handle the progressive building up of response content from the server
         // and to be able to effectively do a diff of what has already been received and what is new.
         var accumulatedContent = ""
         var latestElements: [MultimodalElement] = []
         var responseStartedDispatched = false
+        let attemptStartedAt = Date()
+        let callbackSequencer = MainActorCallbackSequencer()
 
         // Resolve the auth token off the UI thread, then send the turn on the main actor.
-        Task { [weak self] in
-            guard let self else { return }
+        //
+        // `self` is captured strongly on purpose: an app that drops its reference to the chat
+        // mid-turn has not cancelled the turn, and the request still has to go out and be reported.
+        // A weak capture would abandon it the moment the caller let go. The hold is bounded by one
+        // turn. `turn` is held strongly for the same reason - it owns the caller's completion.
+        Task { [self] in
             let token = await ConciergeAuthTokenResolver.shared.resolveToken()
-            self.chatService.streamChat(query, token: token,
+
+            ConciergeIdentityBoundary.shared.synchronized {
+            // A deadline may have fired while the token resolved. Sending the request now would
+            // render a reply into a turn whose caller has already been told it failed - but the
+            // caller is still owed an answer either way, so the turn reports here. `resolve` is
+            // idempotent, so a turn a deadline already ended keeps that more specific outcome.
+            guard self.identityReady, self.activeTurn === turn else {
+                Log.debug(label: self.LOG_TAG, "Turn abandoned before it reached the service; not sending.")
+                turn.resolve(.unknown)
+                return
+            }
+            turn.armNoResponseCap { [weak self] interval in
+                self?.cap(turn, after: interval, reason: "produced no response")
+            }
+            self.chatService.streamChat(query, token: token, extraXDMFields: mergedXDMFields.isEmpty ? nil : mergedXDMFields,
+            sessionID: resolvedSessionID,
             onChunk: { [weak self] payload in
-                Task { @MainActor in
-                    guard let self = self else { return }
+                callbackSequencer.enqueue { [weak self] in
+                    guard let self = self, self.identityReady, self.activeTurn === turn else { return }
+
+                    // The service is alive, so the fast "never answered" cap has done its job.
+                    //
+                    // Deliberately *any* chunk, including a content-free heartbeat, rather than the
+                    // `hasVisibleContent` gate used a few lines below for `responseStarted`. The two
+                    // answer different questions: this one asks "is the backend wedged?", which a
+                    // heartbeat disproves, while that one asks "is there something to show the
+                    // user?". Cancelling a turn that is demonstrably alive but still warming up
+                    // would be worse than letting the ceiling bound it, and a backend that
+                    // heartbeats forever without ever answering is still caught there. Matches
+                    // Android, which stands its first-chunk cap down on any emission for the same
+                    // reason.
+                    turn.noteResponseStarted()
 
                     let state = payload.state
+                    if state == ConciergeConstants.StreamState.COMPLETED {
+                        turn.noteResponseCompleted()
+                    }
 
                     // Serializing + pretty-printing the response is only useful for local debugging,
                     #if DEBUG
@@ -499,21 +879,17 @@ final class ChatController: ObservableObject {
                             Log.trace(label: self.LOG_TAG, "Accumulated (len=\(accumulatedContent.count))")
 
                             // Update the streaming message with accumulated content (preserve id)
-                            if streamingMessageIndex < self.messages.count {
-                                var current = self.messages[streamingMessageIndex]
+                            self.updatePlaceholder(of: turn) { current in
                                 current.messageBody = accumulatedContent
                                 current.payload = payload
-                                self.messages[streamingMessageIndex] = current
                             }
                         } else if state == ConciergeConstants.StreamState.COMPLETED {
                             let fullText = message
                             Log.trace(label: self.LOG_TAG, "Completion received. Full text length=\(fullText.count)")
 
-                            if streamingMessageIndex < self.messages.count {
-                                var current = self.messages[streamingMessageIndex]
+                            self.updatePlaceholder(of: turn) { current in
                                 current.messageBody = fullText
                                 current.payload = payload
-                                self.messages[streamingMessageIndex] = current
                             }
 
                             accumulatedContent = fullText
@@ -542,32 +918,80 @@ final class ChatController: ObservableObject {
                 }
             },
             onComplete: { [weak self] error in
-                Task { @MainActor in
-                    guard let self = self else { return }
+                callbackSequencer.enqueue { [weak self] in
+                    // A turn ended by a deadline has already reported its outcome and unwound the
+                    // transcript. Its late completion must not do either a second time.
+                    guard !turn.isResolved else { return }
 
-                    if let error = error {
+                    guard let self = self, self.identityReady, self.activeTurn === turn else {
+                        // The session went away mid-stream; nothing was rendered.
+                        turn.resolve(error ?? .unknown)
+                        return
+                    }
+
+                    // `ConciergeAppState` updates its state synchronously before publishing it.
+                    // This closes the narrow race where a stream fails after the UIKit background
+                    // notification but before the controller's Combine observer receives it.
+                    if self.appState.state == .background {
+                        turn.noteAppBackgrounded()
+                    }
+
+                    // A completed response is authoritative even if the transport reports an
+                    // error as it closes the stream. Preserve it rather than discarding or retrying.
+                    let effectiveError = turn.hasCompletedResponse ? nil : error
+                    if let effectiveError, turn.reserveBackgroundRecovery(for: effectiveError) {
+                        self.retryAfterForeground(turn, RecoveryRequest(
+                            query: query,
+                            xdmFields: mergedXDMFields,
+                            sessionID: resolvedSessionID,
+                            error: effectiveError,
+                            attemptStartedAt: attemptStartedAt
+                        ))
+                        return
+                    }
+
+                    // The caller must hear back on every path out of this closure, including the
+                    // early `return`s below and a deallocated controller. `resolve` is idempotent,
+                    // so the `defer` can fire unconditionally without racing the paths that report
+                    // a more specific outcome first.
+                    var outcome: ConciergeError? = effectiveError
+                    defer { turn.resolve(outcome) }
+
+                    if let error = effectiveError {
+                        if !turn.allowsBackgroundRecovery {
+                            Log.warning(label: self.LOG_TAG, "Background recovery resend failed; no further resend will be attempted.")
+                        } else if turn.hasOverlappedBackground {
+                            Log.debug(label: self.LOG_TAG, "Background-overlapped turn failure is not eligible for automatic recovery.")
+                        }
                         Log.error(label: self.LOG_TAG, "Streaming error: \(error)")
                         self.dispatchTrackingEvent(.errorOccurred(errorMessage: error.localizedDescription))
-                        self.chatState = .error(.networkFailure)
 
-                        if streamingMessageIndex < self.messages.count {
-                            self.messages.remove(at: streamingMessageIndex)
+                        self.discardPlaceholder(of: turn)
+
+                        // A failed turn is a *finished* turn: surface the failure and return to
+                        // idle. Parking in `.error` would deadlock the chat - `sendMessage`,
+                        // `sendEnabled`, and `micEnabled` all require `.idle`, and the only path
+                        // back to `.idle` runs inside a turn those guards prevent from starting.
+                        if turn.rendersFailures {
+                            self.messages.append(Message(template: .basic(isUserMessage: false),
+                                                         messageBody: self.networkErrorMessage))
                         }
+
+                        self.endTurn(turn)
                     } else if accumulatedContent.isEmpty && latestElements.isEmpty {
+                        outcome = .invalidResponseData
                         // Genuinely empty response — no text and no multimodal elements.
-                        if streamingMessageIndex < self.messages.count {
-                            self.messages.remove(at: streamingMessageIndex)
+                        self.discardPlaceholder(of: turn)
+
+                        if turn.rendersFailures {
+                            self.messages.append(Message(template: .basic(isUserMessage: false), messageBody: "Sorry, I wasn't able to get a response from the Concierge Service. \n\nPlease try again later."))
                         }
 
-                        self.messages.append(Message(template: .basic(isUserMessage: false), messageBody: "Sorry, I wasn't able to get a response from the Concierge Service. \n\nPlease try again later."))
-
-                        self.clearState()
+                        self.endTurn(turn)
                     } else {
-                        var completedPayload: ConversationPayload?
-                        if streamingMessageIndex < self.messages.count {
-                            var current = self.messages[streamingMessageIndex]
+                        let completed = self.updatePlaceholder(of: turn) { current in
                             current.messageBody = accumulatedContent
-                            current.shouldSpeakMessage = true
+                            current.shouldSpeakMessage = !accumulatedContent.isEmpty
                             if !self.latestSources.isEmpty {
                                 Log.trace(label: self.LOG_TAG, "Using sources: count=\(self.latestSources.count)")
                                 current.sources = self.latestSources
@@ -578,14 +1002,20 @@ final class ChatController: ObservableObject {
                             }
                             current.feedbackEligible = current.payload?.response?.feedback?.eligible ?? false
                             current.isStreamComplete = true
-                            self.messages[streamingMessageIndex] = current
-                            completedPayload = current.payload
                         }
 
-                        guard let completedPayload else {
-                            Log.warning(label: self.LOG_TAG, "responseCompleted skipped: streaming message index out of bounds")
-                            self.clearState()
+                        guard let completedPayload = completed?.payload else {
+                            Log.warning(label: self.LOG_TAG, "responseCompleted skipped: the turn's message is no longer in the transcript")
+                            self.endTurn(turn)
                             return
+                        }
+
+                        // A cards-only response has nothing for the text bubble, so drop the
+                        // placeholder rather than leave an empty one above the cards. Deliberately
+                        // after the guard above: removing it on a path that then returns early
+                        // would strip the turn's only message and still report success.
+                        if accumulatedContent.isEmpty && !latestElements.isEmpty {
+                            self.discardPlaceholder(of: turn)
                         }
                         self.dispatchTrackingEvent(.responseCompleted(
                             conversationId: completedPayload.conversationId ?? "unknown",
@@ -604,16 +1034,37 @@ final class ChatController: ObservableObject {
                             }
                         }
 
-                        self.clearState()
+                        self.endTurn(turn)
                     }
                 }
             }
             )
+            }
         }
+
+        return turn
     }
 
+    /// Applies `edit` to `turn`'s streaming message and returns the result, or `nil` when that
+    /// message is no longer in the transcript.
+    ///
+    /// Looked up by id rather than by a captured index: the transcript shifts under a turn as cards
+    /// and prompt suggestions are appended, and a stale index silently edits a neighbouring
+    /// message instead of failing.
+    @discardableResult
+    private func updatePlaceholder(of turn: ChatTurn, _ edit: (inout Message) -> Void) -> Message? {
+        guard let index = messages.firstIndex(where: { $0.id == turn.placeholderId }) else { return nil }
+        var current = messages[index]
+        edit(&current)
+        messages[index] = current
+        return current
+    }
+
+    /// Returns the chat to idle and drops the per-turn accumulators.
+    ///
+    /// Clearing `activeTurn` is what publishes `.idle`; see the property's note.
     private func clearState() {
-        chatState = .idle
+        activeTurn = nil
         latestSources = []
         latestLinkHints = []
         latestPromptSuggestions = []
