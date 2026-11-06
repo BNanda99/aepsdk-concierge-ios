@@ -11,6 +11,7 @@
  */
 
 import AEPCore
+import AEPServices
 import AEPBrandConcierge
 import AEPEdge
 import AEPEdgeIdentity
@@ -28,17 +29,42 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         ]
 
         MobileCore.registerExtensions(extensions) {
-            MobileCore.configureWith(appId: "staging/1b50a869c4a2/570831bce333/launch-bcc070a55cca-development")
+            MobileCore.configureWith(appId: "/staging/a0ff8cfcfb87/9d363ab429c8/launch-481f6ff16749-development")
+
+            let identityMap = IdentityMap()
+            identityMap.add(
+                item: IdentityItem(id: "22e8b663dd7d0ca003fea59bd163d97bf2f4c84538bfb3875b9a86b30aefc9cd"),
+                withNamespace: "Email_LC_SHA256"
+            )
+            AEPEdgeIdentity.Identity.updateIdentities(with: identityMap)
+
+            do {
+                try Concierge.updateXDMContext(KingsHostContext.demoFacts)
+                try Concierge.updateXDMContext([
+                    "_sacramentokings": [
+                        "conciergeContext": [
+                            "userContext": [
+                                "email": "visampath+Diego@adobe.com",
+                                "nbaid": "abc123",
+                                "tmid": "rvt122"
+                            ]
+                        ]
+                    ]
+                ])
+            } catch {
+                Log.error(label: "ConciergeDemoApp", "Failed to set login user context: \(error)")
+            }
 
             // TODO: - temporary override of datastream and server until we get that sorted out
-            MobileCore.updateConfigurationWith(configDict: [
-                "concierge.configId": "6acf9d12-5018-4f84-8224-aac4900782f0",
-                "concierge.server": "edge-int.adobedc.net",
-                "concierge.region": "va7"
-            ])
+//            MobileCore.updateConfigurationWith(configDict: [
+//                "concierge.configId": "6acf9d12-5018-4f84-8224-aac4900782f0",
+//                "concierge.server": "edge-int.adobedc.net",
+//                "concierge.region": "va7"
+//            ])
         }
 
         Concierge.setEdgeTrackingEnabled(enable: true)
+        FnbCardRegistration.register()
 
         #if DEBUG
         // URLProtocol.registerClass isn't reliably consulted for ConciergeChatService's custom

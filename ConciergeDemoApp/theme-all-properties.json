@@ -1,72 +1,71 @@
 {
   "metadata": {
-    "brandName": "Concierge Demo",
+    "brandName": "Sacramento Kings",
     "version": "1.0.0",
     "language": "en-US",
-    "namespace": "brand-concierge"
+    "namespace": "brand-concierge-kings"
+  },
+  "header": {
+    "title": "Kings Concierge",
+    "subtitle": "Powered by Adobe",
+    "layoutType": "textOnly"
   },
   "behavior": {
-    "welcomeCard": {
-      "closeButtonAlignment": "start",
-      "promptFullWidth": false,
-      "promptMaxLines": 1,
-      "contentAlignment": "top"
-    },
-    "feedback": {
-      "displayMode": "action",
-      "thumbsPlacement": "below",
-      "showCloseButton": true,
-      "showCancelButton": false
+    "multimodalCarousel": {
+      "cardClickAction": "openLink"
     },
     "citations": {
       "showLinkIcon": true
     },
-    "multimodalCarousel": {
-      "cardClickAction": "openLink",
-      "carouselStyle": "scroll"
-    },
     "input": {
       "enableVoiceInput": true,
       "disableMultiline": false,
-      "showAiChatIcon": {
-        "icon": "InputLeadingIcon"
-      },
-      "sendButtonStyle": "arrow",
-      "silenceDuration": 4,
-      "silenceThreshold": 0.02
+      "showAiChatIcon": null
     },
     "chat": {
       "messageAlignment": "left",
-      "messageWidth": "100%",
-      "userMessageBubbleStyle": "balloon"
+      "messageWidth": "100%"
     },
     "privacyNotice": {
       "title": "Privacy Notice",
       "text": ""
     },
-    "productCard": {
-      "cardStyle": "productDetail",
-      "cardsAlignment": "start"
+    "feedback": {
+      "alwaysDisplay": true,
+      "thumbsPlacement": "standalone"
     },
-    "promptSuggestions": {
-      "itemMaxLines": 1,
-      "showHeader": true,
-      "alignToMessage": true
+    "welcomeCard": {
+      "closeButtonAlignment": "end",
+      "promptFullWidth": true,
+      "promptMaxLines": 3,
+      "contentAlignment": "top"
     }
   },
+  "privacyNotice": {
+      "title": "Privacy Notice Kings",
+      "text": "Privacy notice text for Kings."
+    },
   "disclaimer": {
-    "text": "AI responses may be inaccurate and any offers provided are non-binding. Generative AI {Terms}.",
+    "text": "The Sacramento Kings provides the Brand Concierge AI-assisted chatbot service. Your messages will be processed by the {Sacramento Kings} and our AI chatbot service provider, {Adobe}. Please do not provide sensitive personal information (such as financial or health information) in the chatbot. If you prefer not to use our chat service, please contact our Customer Service team at 888-91-KINGS. By using this AI-assisted chatbot service, you agree to the Sacramento Kings {Terms of Use}.",
     "links": [
       {
-        "text": "Terms",
-        "url": "https://www.adobe.com/legal/licenses-terms/adobe-gen-ai-user-guidelines.html"
+        "text": "Sacramento Kings",
+        "url": "https://www.nba.com/kings/kings-privacy-policy"
+      },
+      {
+        "text": "Adobe",
+        "url": "https://www.adobe.com/privacy/policy.html"
+      },
+      {
+        "text": "Terms of Use",
+        "url": "https://www.nba.com/termsofuse"
       }
     ]
   },
   "text": {
-    "welcome.heading": "Welcome to Brand Concierge!",
-    "welcome.subheading": "I'm your personal guide to help you explore and find exactly what you need. Let's get started!\n\nNot sure where to start? Explore the suggested ideas below.",
-    "input.placeholder": "How can I help?",
+    "welcome.heading": "Welcome to Kings Concierge",
+    "welcome.subheading": "Ask me about upcoming games, tickets, Golden 1 Center information, or food and beverage options. I'm here to help you find what you need.\n\nNot sure where to get started? Explore the suggested ideas below.",
+    "input.placeholder": "Ask anything",
     "input.messageInput.aria": "Message input",
     "input.send.aria": "Send message",
     "input.aiChatIcon.tooltip": "Ask AI",
@@ -76,7 +75,9 @@
     "carousel.next.aria": "Next cards",
     "scroll.bottom.aria": "Scroll to bottom",
     "error.network": "I'm sorry, I'm having trouble connecting to our services right now.",
-    "loading.message": "",
+    "loading.message": "Generating a response...",
+    "feedbackHelpfulLabel": "Was this helpful?",
+    "sourcesLabel": "Sources",
     "feedback.dialog.title.positive": "Your feedback is appreciated",
     "feedback.dialog.title.negative": "Your feedback is appreciated",
     "feedback.dialog.question.positive": "What went well? Select all that apply.",
@@ -87,29 +88,29 @@
     "feedback.dialog.notes.placeholder": "Additional notes (optional)",
     "feedback.toast.success": "Thank you for the feedback.",
     "feedback.thumbsUp.aria": "Thumbs up",
-    "feedback.thumbsDown.aria": "Thumbs down",
-    "header.title": "",
-    "header.subtitle": "",
-    "sourcesLabel": "Sources",
-    "feedbackHelpfulLabel": "Was this helpful?",
-    "suggestions.header": "Suggestions"
+    "feedback.thumbsDown.aria": "Thumbs down"
   },
   "arrays": {
     "welcome.examples": [
       {
-        "image": "https://picsum.photos/200/300",
-        "text": "Top Deals Right Now",
-        "backgroundColor": "#BCBCBC"
+        "text": "When’s the next Kings home game?",
+        "image": "https://cdn.nba.com/teams/uploads/sites/1610612758/2024/05/Slamson.jpg",
+        "backgroundColor": "#bec9cf"
       },
       {
-        "image": "https://picsum.photos/200/300",
-        "text": "Products for Me",
-        "backgroundColor": "#BCBCBC"
+        "text": "Where can I get Kings gear?",
+        "image": "https://cdn.shopify.com/s/files/1/0728/4598/4025/files/Label-K-Store-Sacramento-Kings_33d8dfb8-8814-40be-aa64-ceeb6135cb16.jpg?v=1702600520",
+        "backgroundColor": "#c8d1d6"
       },
       {
-        "image": "https://picsum.photos/200/300",
-        "text": "Fitness & Performance Services",
-        "backgroundColor": "#BCBCBC"
+        "text": "What are my parking options?",
+        "image": "https://cdn-ilejjcb.nitrocdn.com/zlbPDoylBXjgikudjIUbtadvlwEYBxrZ/assets/images/optimized/rev-f4c7155/www.golden1center.com/wp-content/uploads/2023/08/g12.png",
+        "backgroundColor": "#d2d9dd"
+      },
+      {
+        "text": "What can I bring into the arena?",
+        "image": "https://cdn-ilejjcb.nitrocdn.com/zlbPDoylBXjgikudjIUbtadvlwEYBxrZ/assets/images/optimized/rev-f4c7155/www.golden1center.com/wp-content/uploads/2026/09/InnovationAndEntertainment_Image1_Desktop.png",
+        "backgroundColor": "#dbe1e5"
       }
     ],
     "feedback.positive.options": [
@@ -129,178 +130,108 @@
   },
   "assets": {
     "icons": {
-      "company": "logo"
+      "company": "white-crown"
     }
   },
   "theme": {
-    "--welcome-input-order": "3",
-    "--welcome-cards-order": "2",
-
-    "--header-title-font-size": "18px",
-    "--welcome-title-font-size": "16px",
-    "--welcome-text-align": "left",
-    "--welcome-content-padding": "0px",
-    "--welcome-title-bottom-spacing": "10px",
-    "--welcome-prompts-top-spacing": "8px",
-    "--welcome-prompt-spacing": "8px",
-    "--welcome-prompt-padding": "0px",
-    "--welcome-prompt-image-size": "16px",
-    "--welcome-prompt-corner-radius": "20px",
-    "--welcome-prompt-background-color": "#D3D3D3",
-    "--welcome-prompt-text-color": "#000000",
-    "--suggestion-background-color": "#F0F0F0",
-    "--suggestion-text-color": "#131313",
-    "--suggestion-item-border-radius": "60px",
-
-    "--font-family": "",
+    "--font-family": "IBMPlexSans",
     "--line-height-body": "1.5",
-
-    "--color-primary": "#006554",
-    "--color-text": "#131313",
-    "--color-container": "#F0F0F0",
-    "--main-container-background": "#FFFFFF",
-    "--main-container-bottom-background": "#FFFFFF",
-    "--message-blocker-background": "#FFFFFF",
-    "--message-user-background": "#006554",
-    "--message-concierge-background": "#EEEEEE",
-    "--message-concierge-text": "#292929",
-    "--message-concierge-link-color": "#004C3F",
+    "--color-primary": "#8921FE",
+    "--color-on-primary": "#FFFFFF",
+    "--color-secondary": "#2D3437",
+    "--color-text": "#FFFFFF",
+    "--color-container": "#1C2123",
+    "--color-surface": "#1C2123",
+    "--color-on-surface": "#FFFFFF",
+    "--color-background": "#101314",
+    "--color-error": "#FF3B30",
+    "--color-on-error": "#FFFFFF",
+    "--color-outline": "#2D3437",
+    "--main-container-background": "#101314",
+    "--main-container-bottom-background": "#101314",
+    "--message-blocker-background": "#101314",
+    "--message-user-background": "#2D3437",
     "--message-user-text": "#FFFFFF",
-    "--message-max-width": "100%",
+    "--message-concierge-background": "#1C2123",
+    "--message-concierge-text": "#FFFFFF",
+    "--message-concierge-link-color": "#8921FE",
+    "--message-border-radius": "12px",
     "--message-padding": "8px 16px",
-    "--message-border-radius": "8px",
-
+    "--message-max-width": "100%",
     "--agent-icon-size": "39px",
     "--agent-icon-spacing": "12px",
-
-    "--thinking-dot-size": "6px",
-    "--thinking-dot-spacing": "5px",
-    "--thinking-bubble-border-radius": "8px",
-    "--thinking-bubble-padding-horizontal": "14px",
-    "--thinking-bubble-padding-vertical": "12px",
-    "--thinking-dot-vertical-alignment": "center",
-    "--thinking-dot-color": "#666666",
-
-    "--chat-interface-max-width": "768px",
-    "--chat-history-padding": "16px",
-    "--chat-history-padding-top-expanded": "0",
-    "--chat-history-bottom-padding": "0",
-    "--message-blocker-height": "105px",
-
-    "--button-primary-background": "#006554",
+    "--button-primary-background": "#8921FE",
     "--button-primary-text": "#FFFFFF",
-    "--button-secondary-border": "#006554",
-    "--button-secondary-text": "#006554",
-    "--button-height-s": "30px",
-    "--button-disabled-background": "#1A2233",
-
-    "--submit-button-fill-color": "#006554",
-    "--submit-button-fill-color-disabled": "#004C3F",
-    "--color-button-submit": "#FFFFFF",
-
-    "--disclaimer-color": "#A9B3CC",
-    "--disclaimer-font-size": "12px",
-    "--disclaimer-font-weight": "400",
-
-    "--input-border-radius": "26px",
-    "--input-background": "#FFFFFF",
-    "--input-outline-color": "#006554",
-    "--input-outline-width": "2px",
-    "--input-box-shadow": "none",
-    "--input-focus-outline-width": "2px",
-    "--input-focus-outline-color": "#006554",
-    "--input-font-size": "16px",
-    "--input-text-color": "#292929",
-    "--input-button-height": "32px",
-    "--input-button-width": "32px",
-    "--input-button-border-radius": "8px",
-    "--input-height": "52px",
-    "--input-height-mobile": "52px",
-    "--input-border-radius-mobile": "26px",
-    "--input-send-icon-color": "#006554",
-    "--input-mic-icon-color": "#006554",
-    "--input-mic-recording-icon-color" : "#FFFFFF",
-    "--input-mic-waveform-gradient-start-color": "#00F5D4",
-    "--input-mic-waveform-gradient-end-color": "#003D33",
-    "--input-send-arrow-icon-color": "#FFFFFF",
-    "--input-send-arrow-background-color": "#006554",
-
-    "--citations-text-font-weight": "700",
-    "--citations-desktop-button-font-size": "12px",
-    "--citations-background-color": "#006554",
-    "--citations-text-color": "#FFFFFF",
-
-    "--feedback-icon-btn-background": "#FFFFFF",
-    "--feedback-icon-btn-size-desktop": "32px",
-    "--feedback-container-gap": "4px",
-
-    "--feedback-sheet-background-color": "#FFFFFF",
-    "--feedback-title-text-color": "#131313",
-    "--feedback-question-text-color": "#424242",
-    "--feedback-options-text-color": "#131313",
-    "--feedback-checkbox-border-color": "#131313",
-    "--feedback-drag-handle-color": "#CCCCCC",
-    "--feedback-submit-button-fill-color": "#006554",
-    "--feedback-submit-button-text-color": "#FFFFFF",
-    "--feedback-submit-button-border-radius": "10px",
-    "--feedback-submit-button-font-weight": "600",
-    "--feedback-cancel-button-fill-color": "#006554",
-    "--feedback-cancel-button-text-color": "#006554",
-    "--feedback-cancel-button-border-color": "#006554",
-    "--feedback-cancel-button-border-width": "1px",
-    "--feedback-cancel-button-border-radius": "10px",
-    "--feedback-cancel-button-font-weight": "600",
-    "--feedback-checkbox-border-radius": "6px",
-    "--feedback-title-font-size": "22px",
-
-    "--multimodal-card-box-shadow": "0px 1px 4px 0 #191F1C1A",
-    "--border-radius-card": "16px",
-
-    "--message-alignment": "left",
-    "--message-width": "100%",
-
-    "--product-card-outline-color": "#E3E3E3",
-    "--product-card-width": "222",
-    "--product-card-height": "359",
-    "--product-card-title-font-weight": "700",
-    "--product-card-title-font-size": "14px",
-    "--product-card-title-color": "#191F1C",
-    "--product-card-subtitle-font-weight": "400",
-    "--product-card-subtitle-font-size": "12px",
-    "--product-card-subtitle-color": "#4F4F4F",
-    "--product-card-price-font-weight": "400",
-    "--product-card-price-font-size": "14px",
-    "--product-card-price-color": "#191F1C",
-    "--product-card-badge-font-weight": "700",
-    "--product-card-badge-font-size": "12px",
-    "--product-card-badge-text-color": "#FFFFFF",
-    "--product-card-badge-background-color": "#006554",
-    "--product-card-background-color": "#FFFFFF",
-    "--product-card-was-price-color": "#4F4F4F",
-    "--product-card-was-price-font-size": "12px",
-    "--product-card-was-price-font-weight": "400",
-    "--product-card-was-price-text-prefix": "was ",
-    "--product-card-text-horizontal-padding": "0px",
-    "--product-card-text-spacing": "8px",
-    "--product-card-text-top-padding": "24px",
-    "--product-card-text-bottom-padding": "0px",
-    "--product-card-carousel-horizontal-padding": "16px",
-    "--product-card-carousel-spacing": "12px",
-    "--product-card-cta-button-background-color": "#BB5811",
-    "--product-card-cta-button-text-color": "#FFFFFF",
-    "--product-card-cta-button-border-radius": "40px",
-    "--product-card-cta-button-horizontal-padding": "16px",
-    "--product-card-cta-button-vertical-padding": "8px",
-    "--product-card-cta-button-font-size": "12px",
-    "--product-card-cta-button-font-weight": "600",
-    "--cta-button-background-color": "#EDEDED",
-    "--cta-button-text-color": "#191F1C",
-    "--cta-button-icon-color": "#161313",
+    "--button-secondary-border": "#2D3437",
+    "--button-secondary-text": "#FFFFFF",
+    "--button-disabled-background": "#2D3437",
+    "--color-button-submit": "#8921FE",
+    "--submit-button-fill-color": "#FFFFFF",
+    "--submit-button-fill-color-disabled": "#6E6E6E",
+    "--cta-button-background-color": "#8921FE",
+    "--cta-button-text-color": "#FFFFFF",
+    "--cta-button-icon-color": "#FFFFFF",
     "--cta-button-border-radius": "99px",
     "--cta-button-horizontal-padding": "16px",
     "--cta-button-vertical-padding": "12px",
     "--cta-button-font-size": "14px",
-    "--cta-button-font-weight": "400",
-    "--cta-button-icon-size": "16px"
+    "--cta-button-font-weight": "600",
+    "--product-card-cta-button-background-color": "#8921FE",
+    "--product-card-cta-button-text-color": "#FFFFFF",
+    "--product-card-secondary-cta-button-text-color": "#8921FE",
+    "--product-card-secondary-cta-button-border-color": "#8921FE",
+    "--input-height-mobile": "52px",
+    "--input-border-radius-mobile": "12px",
+    "--input-background": "#1C2123",
+    "--input-text-color": "#FFFFFF",
+    "--input-font-size": "16px",
+    "--input-outline-color": "#2D3437",
+    "--input-outline-width": "1px",
+    "--input-focus-outline-color": "#8921FE",
+    "--input-focus-outline-width": "2px",
+    "--input-send-icon-color": "#FFFFFF",
+    "--input-send-arrow-icon-color": "#FFFFFF",
+    "--input-send-arrow-background-color": "#8921FE",
+    "--input-mic-icon-color": "#FFFFFF",
+    "--input-mic-recording-icon-color": "#FFFFFF",
+    "--input-button-height": "32px",
+    "--input-button-width": "32px",
+    "--input-button-border-radius": "8px",
+    "--disclaimer-color": "#ADADAD",
+    "--disclaimer-font-size": "12px",
+    "--disclaimer-font-weight": "400",
+    "--welcome-prompt-background-color": "#1C2123",
+    "--welcome-prompt-text-color": "#FFFFFF",
+    "--welcome-title-font-size": "16px",
+    "--welcome-text-align": "left",
+    "--suggestion-background-color": "#2D3437",
+    "--suggestion-text-color": "#FFFFFF",
+    "--suggestion-item-border-radius": "10px",
+    "--thinking-dot-color": "#8921FE",
+    "--header-title-font-size": "18px",
+    "--citations-background-color": "#2D3437",
+    "--citations-text-color": "#FFFFFF",
+    "--citations-text-font-weight": "700",
+    "--feedback-icon-btn-background": "#1C2123",
+    "--feedback-icon-btn-hover-background": "#2D3437",
+    "--feedback-sheet-background-color": "#1C2123",
+    "--feedback-title-text-color": "#FFFFFF",
+    "--feedback-question-text-color": "#ADADAD",
+    "--feedback-options-text-color": "#FFFFFF",
+    "--feedback-checkbox-border-color": "#FFFFFF",
+    "--feedback-drag-handle-color": "#2D3437",
+    "--feedback-submit-button-fill-color": "#8921FE",
+    "--feedback-submit-button-text-color": "#FFFFFF",
+    "--feedback-cancel-button-fill-color": "#1C2123",
+    "--feedback-cancel-button-text-color": "#FFFFFF",
+    "--feedback-cancel-button-border-color": "#2D3437",
+    "--product-card-background-color": "#1C2123",
+    "--product-card-outline-color": "#2D3437",
+    "--product-card-title-color": "#FFFFFF",
+    "--product-card-subtitle-color": "#ADADAD",
+    "--product-card-price-color": "#FFFFFF",
+    "--product-card-badge-background-color": "#8921FE",
+    "--product-card-badge-text-color": "#FFFFFF",
+    "--border-radius-card": "16px"
   }
 }
