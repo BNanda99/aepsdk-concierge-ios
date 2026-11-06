@@ -87,7 +87,7 @@ struct TestingHubView: View {
                 slowResponseDelay: $buyNowMockSlowResponseDelay,
                 onOpenChat: {
                     Concierge.show(
-                        surfaces: ["web://edge-int.adobedc.net/brand-concierge/pages/745F37C35E4B776E0A49421B@AdobeOrg/acom_m15/index.html"],
+                        surfaces: ["mobileapp://conciergetestapp/home"],
                         title: "Concierge",
                         subtitle: "Powered by Adobe",
                         handleLink: handleLink

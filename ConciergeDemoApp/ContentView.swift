@@ -56,6 +56,8 @@ struct ContentView: View {
     @State private var customLinkHandlingEnabled: Bool = true
     @State private var closeChatOnIntercept: Bool = false
     @State private var selectedTab: DemoTab = .swiftUI
+    @ObservedObject private var parkingBookings = ParkWhizBookingStore.shared
+    @State private var parkingCheckout: ParkWhizCheckout?
 
     /// The "Mock \"Buy now\" response" toggle's value. Lifted out of `BuyNowMockView` so the single
     /// place that owns `BuyNowMockURLProtocol.isEnabled` can combine it with the current tab.
@@ -98,9 +100,10 @@ struct ContentView: View {
 
                         Button(action: {
                             Concierge.show(
-                                surfaces: ["web://edge-int.adobedc.net/brand-concierge/pages/745F37C35E4B776E0A49421B@AdobeOrg/acom_m15/index.html"],
+                                surfaces: ["mobileapp://conciergetestapp/home"],
                                 title: "Concierge",
-                                subtitle: "Powered by Adobe"
+                                subtitle: "Powered by Adobe",
+                                handleLink: handleLink
                             )
                         }) {
                             Text("Open chat (SwiftUI)")
@@ -121,7 +124,8 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(.systemBackground))
                 },
-                hideButton: true
+                hideButton: true,
+                handleLink: handleLink
             )
 
             // Apply theme above ConciergeWrapper so the overlay (and chat view) can read it
@@ -135,7 +139,8 @@ struct ContentView: View {
                 Label(
                     "hello, world", systemImage: "world"
                 ),
-                surfaces: ["web://edge-int.adobedc.net/brand-concierge/pages/745F37C35E4B776E0A49421B@AdobeOrg/acom_m15/index.html"]
+                surfaces: ["web://edge-int.adobedc.net/brand-concierge/pages/745F37C35E4B776E0A49421B@AdobeOrg/acom_m15/index.html"],
+                handleLink: handleLink
             )
             .conciergeTheme(loadedTheme)
             .tag(DemoTab.magic)
@@ -143,7 +148,7 @@ struct ContentView: View {
 
             // MARK: - UIKit example
 
-            UIKitDemoScreen()
+            UIKitDemoScreen(handleLink: handleLink)
                 .tag(DemoTab.uiKit)
                 .tabItem { Label("UIKit", systemImage: "square.stack.3d.up.fill") }
 
@@ -161,7 +166,7 @@ struct ContentView: View {
                 onOpenChatViaSwiftUITab: {
                     selectedTab = .swiftUI
                     Concierge.show(
-                        surfaces: ["web://edge-int.adobedc.net/brand-concierge/pages/745F37C35E4B776E0A49421B@AdobeOrg/acom_m15/index.html"],
+                        surfaces: ["mobileapp://conciergetestapp/home"],
                         title: "Concierge",
                         subtitle: "Powered by Adobe",
                         handleLink: handleLink
@@ -220,6 +225,10 @@ struct ContentView: View {
                 onCancel: { checkoutProduct = nil }
             )
         }
+        .sheet(item: $parkingCheckout) { checkout in
+            ParkWhizBookingSheet(checkout: checkout)
+        }
+        .onChange(of: parkingBookings.identityRevision) { _ in parkingCheckout = nil }
     }
 
     private var showInterceptedAlert: Binding<Bool> {
@@ -247,6 +256,11 @@ struct ContentView: View {
     }
 
     private func handleLink(_ url: URL) -> Bool {
+        if ParkWhizPurchase.isAllowedURL(url) {
+            guard parkingCheckout == nil else { return true }
+            parkingCheckout = ParkWhizCheckout(url: url, identityRevision: parkingBookings.identityRevision)
+            return true
+        }
         guard customLinkHandlingEnabled else { return false }
 
         // A "Buy now" CTA opens the mock checkout screen rather than the generic intercept alert:
@@ -345,8 +359,10 @@ struct ContentView: View {
 
 /// SwiftUI wrapper that hosts the UIKit demo controller inside the tab.
 private struct UIKitDemoScreen: UIViewControllerRepresentable {
+    let handleLink: (URL) -> Bool
     func makeUIViewController(context: Context) -> UINavigationController {
         let root = ConciergeUIKitDemoViewController()
+        root.handleLink = handleLink
         let nav = UINavigationController(rootViewController: root)
         return nav
     }
