@@ -63,10 +63,10 @@ final class FnbModelsTests: XCTestCase {
         let controller = ChatController(configuration: nil,
             chatService: MockChatService(configuration: ConciergeConfiguration()), speechCapturer: nil, speaker: nil)
         let elements = try CardJSONValue.decode([MultimodalElement].self, from: Data("""
-        [{"type":"kings.fnblocation","eventId":202},
-         {"type":"kings.menu","id":"old"},
-         {"type":"kings.menu","id":"new"},
-         {"type":"kings.fnbcart","entity_info":{"id":42}}]
+        [{"type":"custom","rendererId":"kings.fnblocation","eventId":202},
+         {"type":"custom","rendererId":"kings.menu","id":"old"},
+         {"type":"custom","rendererId":"kings.menu","id":"new"},
+         {"type":"custom","rendererId":"kings.fnbcart","entity_info":{"id":42}}]
         """.utf8))
         let payload = try JSONDecoder().decode(ConversationPayload.self, from: Data("{}".utf8))
         controller.renderElementsForTesting(elements, turnId: UUID(), payload: payload, sessionId: session)
@@ -80,11 +80,11 @@ final class FnbModelsTests: XCTestCase {
             guard let card = nativeCard(at: index, in: controller) else {
                 return XCTFail("Expected native card")
             }
-            FnbCardRegistration.receive(type: card.element["type"] as? String ?? "",
-                                        element: card.element, context: card.context)
+            FnbCardRegistration.receive(rendererId: card.element["rendererId"] as? String ?? "",
+                                        element: card.element, context: card.cardContext)
         }
-        FnbCardRegistration.receive(type: older.element["type"] as? String ?? "",
-                                    element: older.element, context: older.context)
+        FnbCardRegistration.receive(rendererId: older.element["rendererId"] as? String ?? "",
+                                    element: older.element, context: older.cardContext)
         XCTAssertEqual(store.currentOrderId, 42)
         XCTAssertFalse(older.isLatest)
         XCTAssertTrue(newer.isLatest)
@@ -450,7 +450,7 @@ final class FnbModelsTests: XCTestCase {
 
     func testFnbStyleOverridesApplyWithBoundedDimensions() {
         var theme = ConciergeTheme()
-        theme.customVariables = [
+        theme.cssVariables = [
             "--fnb-tile-width": "999",
             "--fnb-card-corner-radius": "-1",
             "--simple-card-disabled-opacity": "0.8",
@@ -463,11 +463,24 @@ final class FnbModelsTests: XCTestCase {
                                            fallback: 0.45, range: 0...1), 0.8)
     }
 
+    func testFnbStyleUsesVariablesDecodedFromTheme() throws {
+        let json = """
+        {"theme":{"--fnb-text-primary-color":"#1256ab","--fnb-tile-width":140,
+        "--fnb-card-corner-radius":"20px","--simple-card-disabled-opacity":0.8}}
+        """
+        let theme = try JSONDecoder().decode(ConciergeTheme.self, from: Data(json.utf8))
+        XCTAssertEqual(FnbStyle.primaryText(theme).toHexString(), "#1256AB")
+        XCTAssertEqual(FnbStyle.tileWidth(theme), 140)
+        XCTAssertEqual(FnbStyle.cardRadius(theme), 20)
+        XCTAssertEqual(FnbStyle.dimension("--simple-card-disabled-opacity", theme: theme,
+                                          fallback: 0.45, range: 0...1), 0.8)
+    }
+
     /// The live card in `controller`'s row at `index`, resolved the way `NativeCardView` does.
     @MainActor
     private func nativeCard(at index: Int, in controller: ChatController) -> NativeCard? {
         guard controller.messages.indices.contains(index),
-              case .nativeCard(let cardId) = controller.messages[index].template else { return nil }
+              let cardId = controller.messages[index].nativeCardId else { return nil }
         return controller.nativeCards.card(withId: cardId)
     }
 

@@ -1065,12 +1065,12 @@ enum FnbThemeValue {
 
 enum FnbStyle {
     static func color(_ key: String, theme: ConciergeTheme, fallback: Color) -> Color {
-        FnbThemeValue.color(theme.customVariables[key]) ?? fallback
+        FnbThemeValue.color(theme.cssVariables[key]) ?? fallback
     }
 
     static func dimension(_ key: String, theme: ConciergeTheme, fallback: CGFloat,
                           range: ClosedRange<CGFloat> = 0...1000) -> CGFloat {
-        FnbThemeValue.dimension(theme.customVariables[key], fallback: fallback, range: range)
+        FnbThemeValue.dimension(theme.cssVariables[key], fallback: fallback, range: range)
     }
 
     static func cardBackground(_ theme: ConciergeTheme) -> Color {

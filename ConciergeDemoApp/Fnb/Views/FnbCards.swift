@@ -34,29 +34,29 @@ enum FnbCardRegistration {
                 }
             }
         }
-        Concierge.registerCardRenderer(type: "kings.fnblocation") { element, context, saveState in
+        Concierge.registerCardRenderer(rendererId: "kings.fnblocation") { element, context, saveState in
             AnyView(FnbLocationsCard(element: element, context: context, saveState: saveState,
                                      options: locationOptions))
         }
-        Concierge.registerCardRenderer(type: "kings.menu") { element, context, saveState in
+        Concierge.registerCardRenderer(rendererId: "kings.menu") { element, context, saveState in
             AnyView(FnbMenuCard(element: element, context: context, saveState: saveState, options: menuOptions))
         }
-        Concierge.registerCardRenderer(type: "kings.fnbcart") { element, context, saveState in
+        Concierge.registerCardRenderer(rendererId: "kings.fnbcart") { element, context, saveState in
             AnyView(FnbCartCard(element: element, context: context, saveState: saveState,
                                 options: cartOptions, openCheckout: openCheckout))
         }
-        Concierge.registerCardRenderer(type: ParkingCardTypes.events) { element, context, saveState in
+        Concierge.registerCardRenderer(rendererId: ParkingCardTypes.events) { element, context, saveState in
             AnyView(ParkingEventsCard(element: element, context: context, saveState: saveState,
                                       options: parkingOptions))
         }
     }
 
-    static func receive(type: String, element: [String: Any], context: [String: Any]) {
+    static func receive(rendererId: String, element: [String: Any], context: [String: Any]) {
         guard let cardId = context["cardId"] as? String,
               let sessionId = context["sessionId"] as? String else { return }
         let stale = context["isStale"] as? Bool == true
         let isLatest = context["isLatest"] as? Bool == true
-        switch type {
+        switch rendererId {
         case "kings.fnblocation":
             orders.locationsShown(cardId: cardId, sessionId: sessionId, eventId: element["eventId"],
                                   stale: stale, isLatest: isLatest)
@@ -254,7 +254,7 @@ struct FnbLocationsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
-            FnbCardRegistration.receive(type: "kings.fnblocation", element: element, context: context)
+            FnbCardRegistration.receive(rendererId: "kings.fnblocation", element: element, context: context)
             runtime.adopt(context["state"] as? [String: Any] ?? [:])
         }
         .onChange(of: contextRevision) { _ in
@@ -262,7 +262,7 @@ struct FnbLocationsCard: View {
         }
         // A rolled-back newer card promotes this one; let it claim what only the newest may.
         .onChange(of: context["isLatest"] as? Bool == true) { isLatest in
-            if isLatest { FnbCardRegistration.receive(type: "kings.fnblocation", element: element, context: context) }
+            if isLatest { FnbCardRegistration.receive(rendererId: "kings.fnblocation", element: element, context: context) }
         }
     }
 
@@ -386,7 +386,7 @@ struct FnbMenuCard: View {
             sheet(for: item)
         }
         .onAppear {
-            FnbCardRegistration.receive(type: "kings.menu", element: element, context: context)
+            FnbCardRegistration.receive(rendererId: "kings.menu", element: element, context: context)
             runtime.adopt(state)
             if runtime.status == "added" || runtime.status == "unconfirmed" {
                 orders.markMenuSubmitted(cardId: cardId, sessionId: sessionId)
@@ -657,7 +657,7 @@ struct FnbCartCard: View {
         .clipShape(shape)
         .overlay(shape.stroke(FnbStyle.border(theme), lineWidth: 1))
         .onAppear {
-            FnbCardRegistration.receive(type: "kings.fnbcart", element: element, context: context)
+            FnbCardRegistration.receive(rendererId: "kings.fnbcart", element: element, context: context)
             runtime.adopt(context["state"] as? [String: Any] ?? [:])
         }
         .onChange(of: contextRevision) { _ in
@@ -665,7 +665,7 @@ struct FnbCartCard: View {
         }
         // A rolled-back newer card promotes this one; let it claim what only the newest may.
         .onChange(of: context["isLatest"] as? Bool == true) { isLatest in
-            if isLatest { FnbCardRegistration.receive(type: "kings.fnbcart", element: element, context: context) }
+            if isLatest { FnbCardRegistration.receive(rendererId: "kings.fnbcart", element: element, context: context) }
         }
     }
 

@@ -135,7 +135,7 @@ final class FnbCardsTests: XCTestCase {
     @discardableResult
     private func measure<Content: View>(_ content: Content, width: CGFloat, name: String) -> CGSize {
         var theme = ConciergeTheme()
-        theme.customVariables = [
+        theme.cssVariables = [
             "--fnb-card-background-color": "#1C2223",
             "--fnb-tile-background-color": "#222A2B",
             "--fnb-text-primary-color": "#FFFFFF",
@@ -164,7 +164,7 @@ final class FnbCardsTests: XCTestCase {
         // BCOS `add_to_cart` envelope: empty `message`, and `id`/`entityId` stringify a missing orderId.
         let chunk = """
         {"conversationId":"conv","interactionId":"turn","state":"completed","response":{"message":"","multimodalElements":\
-        {"elements":[{"id":"null","entityId":"null","type":"kings.fnbcart","cardType":"kings.fnbcart","entity_info":\(order)}]}}}
+        {"elements":[{"id":"null","entityId":"null","type":"custom","rendererId":"kings.fnbcart","cardType":"kings.fnbcart","entity_info":\(order)}]}}}
         """
         FnbCardRegistration.register()
         let payload = try CardJSONValue.decode(ConversationPayload.self, from: Data(chunk.utf8))
@@ -185,7 +185,7 @@ final class FnbCardsTests: XCTestCase {
         }
         XCTAssertEqual(controller.chatState, .idle)
         XCTAssertEqual(controller.messages.count, 2, "Only the user message and cart should remain")
-        guard case .nativeCard(let cardId) = controller.messages.last?.template,
+        guard let cardId = controller.messages.last?.nativeCardId,
               let card = controller.nativeCards.card(withId: cardId) else {
             return XCTFail("Expected the cart to render as a native card")
         }
