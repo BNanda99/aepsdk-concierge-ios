@@ -31,11 +31,12 @@ final class ParkWhizBookingTests: XCTestCase {
                         "pastBookings": [["bookingId": "118734521"]]
                     ]]]
                 ] as NSDictionary)
-            }, send: { hint, fields in
+            }, send: { hint, fields, completion in
                 calls.append(hint)
                 let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
                 XCTAssertEqual(data.flatMap { String(data: $0, encoding: .utf8) },
                     #"{"_sacramentokings":{"conciergeAction":{"parkingHandoff":{"bookingId":"118734521"}}}}"#)
+                completion(.success(()))
             })
             XCTAssertEqual(store.receive(purchase(booking), origin: origin, identityRevision: 0), "118734521")
             XCTAssertEqual(calls, ["record", "parking-booking-status"])
@@ -48,7 +49,10 @@ final class ParkWhizBookingTests: XCTestCase {
         var patches: [NSDictionary] = []
         var sends = 0
         let store = ParkWhizBookingStore(publish: { patches.append($0 as NSDictionary) },
-                                        send: { _, _ in sends += 1 })
+                                        send: { _, _, completion in
+                                            sends += 1
+                                            completion(.success(()))
+                                        })
         store.receive(purchase("one"), origin: origin, identityRevision: 0)
         store.receive(purchase("two"), origin: origin, identityRevision: 0)
         XCTAssertEqual(patches.last, [
@@ -58,6 +62,7 @@ final class ParkWhizBookingTests: XCTestCase {
         ] as NSDictionary)
         store.identityDidReset()
         XCTAssertTrue(store.bookingIds.isEmpty)
+        XCTAssertEqual(store.handoffStatus, .idle)
         XCTAssertNil(store.receive(purchase("late"), origin: origin, identityRevision: 0))
         store.receive(purchase("one"), origin: origin, identityRevision: 1)
         XCTAssertEqual(store.bookingIds, ["one"])
@@ -67,7 +72,7 @@ final class ParkWhizBookingTests: XCTestCase {
 
     func testMalformedUnsuccessfulAndUntrustedMessagesDoNotRecordOrSend() {
         let store = ParkWhizBookingStore(publish: { _ in XCTFail("Unexpected record") },
-                                        send: { _, _ in XCTFail("Unexpected send") })
+                                        send: { _, _, _ in XCTFail("Unexpected send") })
         let malformed: [Any] = [
             "invalid", "{}", purchase(NSNull()), purchase(""), purchase("null"), purchase(true),
             ["source": "Attacker", "action": "purchase", "value": ["status": "success", "bookingId": "1"]],
@@ -96,7 +101,7 @@ final class ParkWhizBookingTests: XCTestCase {
     func testFailedContextPublicationDoesNotReportBookingOrSendHandoff() {
         enum Failure: Error { case rejected }
         let store = ParkWhizBookingStore(publish: { _ in throw Failure.rejected },
-                                        send: { _, _ in XCTFail("Context must be recorded before sending") })
+                                        send: { _, _, _ in XCTFail("Context must be recorded before sending") })
         XCTAssertNil(store.receive(purchase("1"), origin: origin, identityRevision: 0))
         XCTAssertTrue(store.bookingIds.isEmpty)
     }
@@ -104,8 +109,76 @@ final class ParkWhizBookingTests: XCTestCase {
     func testResetDuringPublicationCannotSendAnOldIdentityHandoff() {
         var store: ParkWhizBookingStore!
         store = ParkWhizBookingStore(publish: { _ in store.identityDidReset() },
-                                     send: { _, _ in XCTFail("Old checkout callback survived reset") })
+                                     send: { _, _, _ in XCTFail("Old checkout callback survived reset") })
         XCTAssertNil(store.receive(purchase("old"), origin: origin, identityRevision: 0))
+        XCTAssertTrue(store.bookingIds.isEmpty)
+    }
+
+    func testKnownRejectionCanRetryStatusWithoutRepublishingPurchase() throws {
+        var completions: [@MainActor (Result<Void, ConciergeDataHandoffError>) -> Void] = []
+        var published: [[String: Any]] = []
+        var sentFields: [[String: Any]] = []
+        let store = ParkWhizBookingStore(publish: { published.append($0) },
+                                        send: { hint, fields, completion in
+                                            XCTAssertEqual(hint, "parking-booking-status")
+                                            sentFields.append(fields)
+                                            completions.append(completion)
+                                        })
+
+        XCTAssertEqual(store.receive(purchase("known-rejection"), origin: origin, identityRevision: 0),
+                       "known-rejection")
+        let rejectedCompletion = try XCTUnwrap(completions.first)
+        rejectedCompletion(.failure(.chatInProgress))
+        XCTAssertEqual(store.handoffStatus, .rejected)
+        store.retryStatus()
+        XCTAssertEqual(store.handoffStatus, .sending)
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(sentFields.count, 2)
+        XCTAssertEqual(sentFields[0] as NSDictionary, sentFields[1] as NSDictionary)
+
+        let successfulCompletion = try XCTUnwrap(completions.last)
+        successfulCompletion(.success(()))
+        XCTAssertEqual(store.handoffStatus, .succeeded)
+        XCTAssertEqual(store.bookingIds, ["known-rejection"])
+        store.retryStatus()
+        XCTAssertEqual(sentFields.count, 2, "A successful status handoff cannot be retried.")
+    }
+
+    func testUncertainAndThrownHandoffOutcomesCannotRetry() throws {
+        var completion: (@MainActor (Result<Void, ConciergeDataHandoffError>) -> Void)?
+        var sends = 0
+        let store = ParkWhizBookingStore(publish: { _ in },
+                                        send: { _, _, done in
+                                            sends += 1
+                                            completion = done
+                                        })
+        store.receive(purchase("uncertain"), origin: origin, identityRevision: 0)
+        let uncertainCompletion = try XCTUnwrap(completion)
+        uncertainCompletion(.failure(.deliveryTimeout))
+        XCTAssertEqual(store.handoffStatus, .uncertain)
+        store.retryStatus()
+        XCTAssertEqual(sends, 1)
+
+        enum Failure: Error { case thrown }
+        let throwingStore = ParkWhizBookingStore(publish: { _ in },
+                                                send: { _, _, _ in throw Failure.thrown })
+        throwingStore.receive(purchase("thrown"), origin: origin, identityRevision: 0)
+        XCTAssertEqual(throwingStore.handoffStatus, .uncertain)
+        throwingStore.retryStatus()
+        XCTAssertEqual(throwingStore.handoffStatus, .uncertain)
+    }
+
+    func testHandoffCompletionFromOldIdentityCannotUpdateResetState() throws {
+        var completion: (@MainActor (Result<Void, ConciergeDataHandoffError>) -> Void)?
+        let store = ParkWhizBookingStore(publish: { _ in },
+                                        send: { _, _, done in completion = done })
+        store.receive(purchase("old-identity"), origin: origin, identityRevision: 0)
+        XCTAssertEqual(store.handoffStatus, .sending)
+
+        store.identityDidReset()
+        let oldCompletion = try XCTUnwrap(completion)
+        oldCompletion(.success(()))
+        XCTAssertEqual(store.handoffStatus, .idle)
         XCTAssertTrue(store.bookingIds.isEmpty)
     }
 

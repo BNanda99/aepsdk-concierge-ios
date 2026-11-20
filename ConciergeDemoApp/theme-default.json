@@ -159,6 +159,7 @@
     "--fnb-tag-text-color": "#FFFFFF",
     "--fnb-text-primary-color": "#FFFFFF",
     "--fnb-text-secondary-color": "#ADADAD",
+    "--fnb-text-accent-color": "#C9A6FF",
     "--fnb-tile-background-color": "#22282A",
     "--fnb-tile-corner-radius": "12px",
     "--fnb-tile-image-height": "112px",

@@ -63,7 +63,7 @@ final class FnbModelsTests: XCTestCase {
         let controller = ChatController(configuration: nil,
             chatService: MockChatService(configuration: ConciergeConfiguration()), speechCapturer: nil, speaker: nil)
         let elements = try CardJSONValue.decode([MultimodalElement].self, from: Data("""
-        [{"type":"custom","rendererId":"kings.fnblocation","eventId":202},
+        [{"type":"custom","rendererId":"kings.fnblocation","rendererContext":{"eventId":202}},
          {"type":"custom","rendererId":"kings.menu","id":"old"},
          {"type":"custom","rendererId":"kings.menu","id":"new"},
          {"type":"custom","rendererId":"kings.fnbcart","entity_info":{"id":42}}]
@@ -310,6 +310,7 @@ final class FnbModelsTests: XCTestCase {
         XCTAssertEqual(summary.total, 925)
         XCTAssertEqual(summary.discount, 100)
         XCTAssertEqual(summary.lines.count, 1)
+        XCTAssertTrue(summary.linesComplete)
         XCTAssertNil(FnbOrderSummary.map(["id": "null"], fallbackId: NSNull()))
     }
 
@@ -325,7 +326,7 @@ final class FnbModelsTests: XCTestCase {
             ]]
         ], fallbackId: nil))
         XCTAssertEqual(summary.subtotal, 1_000)
-        XCTAssertEqual(summary.total, 1_000)
+        XCTAssertNil(summary.total)
         XCTAssertEqual(summary.lines[0].modifiers, "Large, Lemon")
         XCTAssertEqual(summary.lines[0].standName, "Market Cafe")
         XCTAssertEqual(summary.lines[0].note, "light ice")
@@ -342,6 +343,27 @@ final class FnbModelsTests: XCTestCase {
         ], fallbackId: nil))
         XCTAssertNil(summary.subtotal)
         XCTAssertNil(summary.total)
+    }
+
+    func testCartDetectsMissingInvalidDuplicateAndTruncatedItems() throws {
+        func line(_ id: Int) -> [String: Any] {
+            ["id": id, "quantity": 1, "pricePer": 3, "product": ["title": "Soda"]]
+        }
+        let payloads: [Any?] = [
+            nil, NSNull(), line(1), [line(1), "not an item"] as [Any], [line(1), ["id": 2]],
+            [line(1), line(1)], (1...51).map(line), (1...501).map(line)
+        ]
+        for items in payloads {
+            var order: [String: Any] = ["id": 1, "totalNet": 42]
+            order["items"] = items
+            let summary = try XCTUnwrap(FnbOrderSummary.map(order, fallbackId: nil))
+            XCTAssertFalse(summary.linesComplete)
+            XCTAssertLessThanOrEqual(summary.lines.count, 50)
+            XCTAssertNil(summary.subtotal, "A partial line sum isn't an order subtotal")
+        }
+        let empty = try XCTUnwrap(FnbOrderSummary.map(["id": 1, "items": []], fallbackId: nil))
+        XCTAssertTrue(empty.linesComplete)
+        XCTAssertTrue(empty.lines.isEmpty)
     }
 
     func testTapin2StageCatalogFixtureMapsVendorFieldNamesAndLimits() throws {
@@ -466,10 +488,13 @@ final class FnbModelsTests: XCTestCase {
     func testFnbStyleUsesVariablesDecodedFromTheme() throws {
         let json = """
         {"theme":{"--fnb-text-primary-color":"#1256ab","--fnb-tile-width":140,
+        "--fnb-text-accent-color":"#C9A6FF","--fnb-accent-color":"#8921FE",
         "--fnb-card-corner-radius":"20px","--simple-card-disabled-opacity":0.8}}
         """
         let theme = try JSONDecoder().decode(ConciergeTheme.self, from: Data(json.utf8))
         XCTAssertEqual(FnbStyle.primaryText(theme).toHexString(), "#1256AB")
+        XCTAssertEqual(FnbStyle.textAccent(theme).toHexString(), "#C9A6FF")
+        XCTAssertEqual(FnbStyle.accent(theme).toHexString(), "#8921FE")
         XCTAssertEqual(FnbStyle.tileWidth(theme), 140)
         XCTAssertEqual(FnbStyle.cardRadius(theme), 20)
         XCTAssertEqual(FnbStyle.dimension("--simple-card-disabled-opacity", theme: theme,
@@ -711,7 +736,9 @@ final class FnbModelsTests: XCTestCase {
             "category": ["id": "snacks", "name": "Snacks"],
             "product": ["id": "404", "name": "Nachos", "price": 5, "modifierGroups": [
                 ["id": "required-sauces", "isMultiSelect": true,
-                 "modifiers": [["id": "10", "title": "Salsa"]]]
+                 "modifiers": [["id": "10", "title": "Salsa"]]],
+                ["id": "toppings", "isMultiSelect": true,
+                 "modifiers": [["id": "20", "title": "Cheese"], ["id": "21", "title": "Peppers"]]]
             ]]
         ]]).first)
         let currentMenuFields = try XCTUnwrap(FnbHandoff.addToCart(lines: [line], menuItems: ["404": menuItem]))
@@ -762,6 +789,8 @@ final class FnbModelsTests: XCTestCase {
         store.checkoutDidOpen(orderId: "42", sessionId: "s")
         let archivedPatchCount = patches.count
         XCTAssertTrue(store.canOpenCheckout(cardId: "cart", sessionId: "s", orderId: "42", stale: false, isLatest: true, unresolved: true))
+        XCTAssertFalse(store.canOpenCheckout(cardId: "cart", sessionId: "s", orderId: "42", stale: false,
+                                              isLatest: false, unresolved: false))
         store.checkoutDidOpen(orderId: "42", sessionId: "s")
         XCTAssertEqual(patches.count, archivedPatchCount)
         XCTAssertNil(store.currentOrderId)
@@ -857,21 +886,144 @@ final class FnbModelsTests: XCTestCase {
         XCTAssertTrue(parking.bookingIds.isEmpty)
     }
 
-    func testUnfulfillableRequiredModifierGroupsRejectProductRatherThanRelaxingMinimum() {
+    func testUnfulfillableRequiredModifierGroupsKeepProductVisibleButUnavailable() throws {
         let groups: [[String: Any]] = [
-            ["id": "required", "minQuantity": 1, "modifiers": [["id": "1", "title": "Sold out", "isActive": false]]],
-            ["id": "required", "minQuantity": 2, "modifiers": [["id": "1", "title": "Only one"]]],
-            ["id": "required", "minQuantity": 2, "maximumSelections": 1,
+            ["id": "required", "title": "Sauce", "minQuantity": 1,
+             "modifiers": [["id": "1", "title": "Sold out", "isActive": false]]],
+            ["id": "required", "title": "Sauce", "minQuantity": 2, "modifiers": [["id": "1", "title": "Only one"]]],
+            ["id": "required", "title": "Sauce", "minQuantity": 2, "maximumSelections": 1,
              "modifiers": [["id": "1", "title": "One"], ["id": "2", "title": "Two"]]],
-            ["id": "required", "minQuantity": 51, "modifiers": [["id": "1", "title": "One"]]]
+            ["id": "required", "title": "Sauce", "minQuantity": 51, "modifiers": [["id": "1", "title": "One"]]],
+            ["id": "required", "title": "Sauce", "minQuantity": 1, "maxQuantity": "invalid", "modifiers": []],
+            ["id": "required", "title": "Sauce", "minQuantity": 1, "modifiers": [["id": "not-a-number", "title": "One"]]],
+            ["id": "required", "title": "Sauce", "minQuantity": 1, "showPublic": false],
+            ["id": "required", "title": "Sauce", "minQuantity": 1, "maximumSelections": 0,
+             "modifiers": [["id": "1", "title": "One"]]],
+            ["id": "required", "title": "Sauce", "minQuantity": 2, "maximumSelections": 3,
+             "modifiers": [["id": "1", "title": "One"], ["id": "2", "title": "Two"]]]
         ]
+        func item(_ groups: [Any]) throws -> FnbItem {
+            try XCTUnwrap(FnbItem.map([["category": ["id": "c", "title": "Menu"],
+                "product": ["id": "1", "title": "Choice", "price": 5, "modifierGroups": groups]]]).first)
+        }
+        let line = FnbLine(id: "1", name: "Choice", quantity: 1, locationId: "2",
+                           note: nil, selectedModifiers: [])
         for group in groups {
-            XCTAssertTrue(FnbItem.map([["category": ["id": "c", "title": "Menu"],
-                "product": ["id": "1", "title": "Required choice", "price": 5, "modifierGroups": [group]]]]).isEmpty)
+            let mapped = try item([group])
+            XCTAssertFalse(mapped.isAvailable)
+            XCTAssertNil(FnbHandoff.addToCart(lines: [line], menuItems: [mapped.id: mapped]))
         }
         let optional = ["id": "optional", "minQuantity": 0, "modifiers": []] as [String: Any]
-        XCTAssertEqual(FnbItem.map([["category": ["id": "c", "title": "Menu"],
-            "product": ["id": "1", "title": "Optional choice", "price": 5, "modifierGroups": [optional]]]]).count, 1)
+        XCTAssertTrue(try item([optional]).isAvailable)
+        let required = ["id": "required", "title": "Sauce", "minQuantity": 1,
+                        "modifiers": [["id": "1", "title": "One"]]] as [String: Any]
+        let available = try item([required])
+        XCTAssertTrue(available.isAvailable)
+        XCTAssertNil(FnbHandoff.addToCart(lines: [line], menuItems: [available.id: available]))
+
+        let optionalGroups: [Any] = (1...20).map { ["id": "group-\($0)"] }
+        XCTAssertFalse(try item(optionalGroups + [required]).isAvailable)
+        let tooManyOptions = (1...51).map { ["id": "\($0)", "title": "Option \($0)"] }
+        XCTAssertFalse(try item([["id": "oversized", "modifiers": tooManyOptions]]).isAvailable)
+    }
+
+    @MainActor
+    func testLocationsReadRendererContextAndMergeEventIntoLaterAction() throws {
+        let held = ConciergeXDMContextStore(sessionIDProvider: { "session" })
+        let store = FnbOrderStore(publish: { patch in
+            do {
+                try held.update(patch)
+            } catch {
+                XCTFail("Unexpected invalid context patch: \(error)")
+            }
+        })
+        FnbCardRegistration.receive(rendererId: "kings.fnblocation",
+                                    element: ["eventId": 999, "rendererContext": ["eventId": 36844.0],
+                                              "entity_info": [["id": 12, "title": "Stand"]]],
+                                    context: ["cardId": "locations", "sessionId": "session", "isLatest": true],
+                                    orderStore: store)
+        let line = FnbLine(id: "34", name: "Nachos", quantity: 1, locationId: "12",
+                           note: nil, selectedModifiers: [])
+        let action = try XCTUnwrap(FnbHandoff.addToCart(lines: [line]))
+        let composed = ConciergeXDMContextStore.merging(action, over: held.snapshot(for: "session"))
+        let namespace = try XCTUnwrap(composed["_sacramentokings"] as? [String: Any])
+        let context = try XCTUnwrap(namespace["conciergeContext"] as? [String: Any])
+        let orders = try XCTUnwrap(context["fnbOrders"] as? [String: Any])
+        XCTAssertEqual((orders["eventId"] as? NSNumber)?.int64Value, 36844)
+        let actions = try XCTUnwrap(namespace["conciergeAction"] as? [String: Any])
+        let addToCart = try XCTUnwrap(actions["addToCart"] as? [String: Any])
+        XCTAssertNotNil(addToCart["products"])
+        XCTAssertNil(addToCart["eventId"])
+    }
+
+    @MainActor
+    func testNewestLocationsClearMissingAndInvalidEventsWithoutClearingOrder() throws {
+        let held = ConciergeXDMContextStore(sessionIDProvider: { "session" })
+        let store = FnbOrderStore(publish: { patch in
+            do {
+                try held.update(patch)
+            } catch {
+                XCTFail("Unexpected invalid context patch: \(error)")
+            }
+        })
+        store.cartShown(cardId: "cart", sessionId: "session", orderId: 42,
+                        paid: false, stale: false, isLatest: true)
+        let invalidEvents: [Any?] = [nil, NSNull(), -1, 1.5, true, "invalid"]
+        for (index, event) in invalidEvents.enumerated() {
+            store.locationsShown(cardId: "valid-\(index)", sessionId: "session", eventId: 202,
+                                 stale: false, isLatest: true)
+            var element: [String: Any] = ["eventId": 999, "entity_info": [["id": 12, "title": "Stand"]]]
+            if let event {
+                element["rendererContext"] = ["eventId": event]
+            }
+            FnbCardRegistration.receive(rendererId: "kings.fnblocation",
+                                        element: element,
+                                        context: ["cardId": "invalid-\(index)", "sessionId": "session", "isLatest": true],
+                                        orderStore: store)
+            let namespace = try XCTUnwrap(held.snapshot(for: "session")["_sacramentokings"] as? [String: Any])
+            let context = try XCTUnwrap(namespace["conciergeContext"] as? [String: Any])
+            let orders = try XCTUnwrap(context["fnbOrders"] as? [String: Any])
+            XCTAssertNil(orders["eventId"])
+            XCTAssertEqual((orders["currentOrder"] as? [String: Any])?["orderId"] as? Int64, 42)
+        }
+    }
+
+    @MainActor
+    func testUnavailableLocationsDoNotReplaceHeldEvent() throws {
+        var patches: [[String: Any]] = []
+        let store = FnbOrderStore(publish: { patches.append($0) })
+        store.locationsShown(cardId: "valid", sessionId: "session", eventId: 202,
+                             stale: false, isLatest: true)
+        FnbCardRegistration.receive(rendererId: "kings.fnblocation",
+                                    element: ["rendererContext": ["eventId": 303], "entity_info": []],
+                                    context: ["cardId": "unavailable", "sessionId": "session", "isLatest": true],
+                                    orderStore: store)
+        XCTAssertEqual(patches.count, 1)
+        let namespace = try XCTUnwrap(patches.last?["_sacramentokings"] as? [String: Any])
+        let context = try XCTUnwrap(namespace["conciergeContext"] as? [String: Any])
+        XCTAssertEqual((context["fnbOrders"] as? [String: Any])?["eventId"] as? Int64, 202)
+    }
+
+    @MainActor
+    func testLocationsRepublishAfterRollbackButIgnoreDuplicatesAndRetiredSessions() throws {
+        var patches: [[String: Any]] = []
+        let store = FnbOrderStore(publish: { patches.append($0) })
+        store.locationsShown(cardId: "first", sessionId: "s", eventId: 202, stale: false, isLatest: true)
+        store.locationsShown(cardId: "second", sessionId: "s", eventId: 303, stale: false, isLatest: true)
+        store.locationsShown(cardId: "first", sessionId: "s", eventId: 202, stale: false, isLatest: true)
+        store.locationsShown(cardId: "first", sessionId: "s", eventId: 202, stale: false, isLatest: true)
+        store.locationsShown(cardId: "second", sessionId: "s", eventId: nil, stale: false, isLatest: false)
+        store.locationsShown(cardId: "stale", sessionId: "s", eventId: nil, stale: true, isLatest: true)
+        XCTAssertEqual(patches.count, 3)
+        let namespace = try XCTUnwrap(patches.last?["_sacramentokings"] as? [String: Any])
+        let context = try XCTUnwrap(namespace["conciergeContext"] as? [String: Any])
+        XCTAssertEqual((context["fnbOrders"] as? [String: Any])?["eventId"] as? Int64, 202)
+        store.identityDidReset()
+        let resetCount = patches.count
+        store.locationsShown(cardId: "second", sessionId: "s", eventId: 303, stale: false, isLatest: true)
+        XCTAssertEqual(patches.count, resetCount)
+        store.locationsShown(cardId: "first", sessionId: "new", eventId: 404, stale: false, isLatest: true)
+        XCTAssertEqual(patches.count, resetCount + 1)
     }
 
     @MainActor

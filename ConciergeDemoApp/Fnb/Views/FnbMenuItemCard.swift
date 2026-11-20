@@ -29,6 +29,8 @@ struct FnbMenuItemCard: View {
     let add: () -> Void
     let decrement: () -> Void
 
+    private var canEdit: Bool { isEditable && item.isAvailable }
+
     private var addLabel: String {
         item.modifierGroups.isEmpty ? "Add \(item.name)" : "Customize \(item.name)"
     }
@@ -38,14 +40,24 @@ struct FnbMenuItemCard: View {
             FnbImage(url: item.image, showsPlaceholder: true, badge: item.isAlcohol ? "21+" : nil,
                      aspectRatio: 1, cornerRadius: 0)
                 .overlay(alignment: .bottomTrailing) {
-                    FnbQuantityControl(quantity: quantity,
-                                       label: quantity == 0 ? addLabel : "Quantity of \(item.name)",
-                                       style: .tile,
-                                       canDecrement: quantity > 0,
-                                       canIncrement: quantity < maximumQuantity,
-                                       decrement: decrement, increment: add)
-                        .disabled(!isEditable)
-                        .padding(6)
+                    if item.isAvailable {
+                        FnbQuantityControl(quantity: quantity,
+                                           label: quantity == 0 ? addLabel : "Quantity of \(item.name)",
+                                           style: .tile,
+                                           canDecrement: quantity > 0,
+                                           canIncrement: quantity < maximumQuantity,
+                                           decrement: decrement, increment: add)
+                            .disabled(!canEdit)
+                            .padding(6)
+                    } else {
+                        Text("Unavailable")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(FnbStyle.tagText(theme))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(FnbStyle.tagBackground(theme), in: Capsule())
+                            .padding(6)
+                    }
                 }
             FnbReservedLines(lineFonts: [.footnote.weight(.semibold), .footnote.weight(.semibold)],
                              spacing: 0) {
@@ -88,8 +100,8 @@ struct FnbMenuItemCard: View {
         .background(FnbStyle.tileBackground(theme))
         .clipShape(RoundedRectangle(cornerRadius: FnbStyle.tileRadius(theme), style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: FnbStyle.tileRadius(theme), style: .continuous))
-        .onTapGesture { if isEditable { open() } }
+        .onTapGesture { if canEdit { open() } }
         .accessibilityElement(children: .contain)
-        .accessibilityAction(named: "Customize") { if isEditable { open() } }
+        .accessibilityAction(named: "Customize") { if canEdit { open() } }
     }
 }

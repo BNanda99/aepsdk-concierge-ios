@@ -15,7 +15,8 @@
       "cardClickAction": "openLink"
     },
     "citations": {
-      "showLinkIcon": true
+      "showLinkIcon": true,
+      "showCitationNumbers": true
     },
     "input": {
       "enableVoiceInput": true,
@@ -52,6 +53,9 @@
           "url": "https://www.adobe.com/privacy/policy.html"
         }
       ]
+    },
+    "promptSuggestions": {
+      "itemMaxLines": 3
     }
   },
   "disclaimer": {
@@ -135,7 +139,9 @@
     }
   },
   "theme": {
+    "--agent-message-padding": "8px 16px",
     "--fnb-accent-color": "#8921FE",
+    "--fnb-text-accent-color": "#C9A6FF",
     "--fnb-button-corner-radius": "99px",
     "--fnb-button-height": "48px",
     "--fnb-card-background-color": "#1C2123",

@@ -13,7 +13,6 @@
 import SwiftUI
 import WebKit
 import AEPBrandConcierge
-import AEPServices
 
 enum ParkWhizPurchase {
     static func isAllowedURL(_ url: URL) -> Bool {
@@ -39,21 +38,43 @@ enum ParkWhizPurchase {
     }
 }
 
+enum ParkWhizHandoffStatus: Equatable {
+    case idle
+    case sending
+    case succeeded
+    case rejected
+    case uncertain
+    case recordingFailed
+
+    var message: String? {
+        switch self {
+        case .idle: return nil
+        case .sending: return "Sending booking status…"
+        case .succeeded: return "Booking status sent."
+        case .rejected: return "Booking status was rejected."
+        case .uncertain: return "Status delivery couldn't be confirmed. No retry is available."
+        case .recordingFailed: return "Booking details couldn't be saved."
+        }
+    }
+}
+
 @MainActor
 final class ParkWhizBookingStore: ObservableObject {
     static let shared = ParkWhizBookingStore()
     @Published private(set) var identityRevision = 0
+    @Published private(set) var handoffStatus = ParkWhizHandoffStatus.idle
     private(set) var bookingIds: [String] = []
     private let publish: ([String: Any]) throws -> Void
-    private let send: (String, [String: Any]) -> Void
+    private let send: (String, [String: Any],
+                       @escaping @MainActor (Result<Void, ConciergeDataHandoffError>) -> Void) throws -> Void
+    private var retryableBookingId: String?
+    private var activeAttempt: UUID?
 
     init(publish: @escaping ([String: Any]) throws -> Void = { try Concierge.updateXDMContext($0) },
-         send: @escaping (String, [String: Any]) -> Void = { hint, fields in
-             Concierge.sendDataHandoff(routingHint: hint, xdmFields: fields) { result in
-                 if case .failure(let error) = result {
-                     Log.warning(label: "ParkWhizBooking", "Parking status handoff rejected: \(error)")
-                 }
-             }
+         send: @escaping (String, [String: Any],
+                          @escaping @MainActor (Result<Void, ConciergeDataHandoffError>) -> Void) throws -> Void = {
+             hint, fields, completion in
+             Concierge.sendDataHandoff(routingHint: hint, xdmFields: fields, completion: completion)
          }) {
         self.publish = publish
         self.send = send
@@ -69,20 +90,74 @@ final class ParkWhizBookingStore: ObservableObject {
                 "parkingBookings": ["pastBookings": updated.map { ["bookingId": $0] }]
             ]]])
         } catch {
-            Log.error(label: "ParkWhizBooking", "Parking booking context could not be published: \(error)")
+            guard identityRevision == self.identityRevision else { return nil }
+            handoffStatus = .recordingFailed
             return nil
         }
         guard identityRevision == self.identityRevision else { return nil }
         bookingIds = updated
-        send("parking-booking-status", ["_sacramentokings": [
-            "conciergeAction": ["parkingHandoff": ["bookingId": booking]]
-        ]])
+        sendStatus(for: booking, identityRevision: identityRevision)
         return booking
+    }
+
+    func retryStatus() {
+        guard handoffStatus == .rejected, let booking = retryableBookingId else { return }
+        sendStatus(for: booking, identityRevision: identityRevision)
     }
 
     func identityDidReset() {
         identityRevision += 1
         bookingIds.removeAll()
+        retryableBookingId = nil
+        activeAttempt = nil
+        handoffStatus = .idle
+    }
+
+    private func sendStatus(for booking: String, identityRevision: Int) {
+        guard identityRevision == self.identityRevision else { return }
+        let attempt = UUID()
+        activeAttempt = attempt
+        handoffStatus = .sending
+        retryableBookingId = nil
+        let fields: [String: Any] = ["_sacramentokings": [
+            "conciergeAction": ["parkingHandoff": ["bookingId": booking]]
+        ]]
+
+        do {
+            try send("parking-booking-status", fields) { [weak self] result in
+                guard let self, self.identityRevision == identityRevision,
+                      self.activeAttempt == attempt else { return }
+                self.activeAttempt = nil
+                switch result {
+                case .success:
+                    self.handoffStatus = .succeeded
+                    self.retryableBookingId = nil
+                case .failure(let error):
+                    if Self.isKnownRejection(error) {
+                        self.handoffStatus = .rejected
+                        self.retryableBookingId = booking
+                    } else {
+                        self.handoffStatus = .uncertain
+                        self.retryableBookingId = nil
+                    }
+                }
+            }
+        } catch {
+            guard identityRevision == self.identityRevision, activeAttempt == attempt else { return }
+            activeAttempt = nil
+            handoffStatus = .uncertain
+            retryableBookingId = nil
+        }
+    }
+
+    private static func isKnownRejection(_ error: ConciergeDataHandoffError) -> Bool {
+        switch error {
+        case .missingEventData, .emptyXdmFields, .invalidXdmFieldValue, .reservedKeyCollision,
+             .noActiveSession, .chatInProgress:
+            return true
+        case .deliveryFailed, .emptyResponse, .deliveryTimeout, .noResponse:
+            return false
+        }
     }
 }
 
@@ -95,13 +170,29 @@ struct ParkWhizCheckout: Identifiable {
 struct ParkWhizBookingSheet: View {
     let checkout: ParkWhizCheckout
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var bookings = ParkWhizBookingStore.shared
 
     var body: some View {
         NavigationView {
-            ParkWhizWebView(checkout: checkout)
-                .navigationTitle("Parking checkout")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Close") { dismiss() } } }
+            VStack(spacing: 0) {
+                ParkWhizWebView(checkout: checkout)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let message = bookings.handoffStatus.message {
+                    HStack(spacing: 12) {
+                        Text(message)
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if bookings.handoffStatus == .rejected {
+                            Button("Retry status") { bookings.retryStatus() }
+                                .font(.footnote.weight(.semibold))
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Parking checkout")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Close") { dismiss() } } }
         }
         .navigationViewStyle(.stack)
     }
@@ -122,7 +213,8 @@ private struct ParkWhizWebView: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
-        if ParkWhizPurchase.isAllowedURL(checkout.url) {
+        if checkout.identityRevision == ParkWhizBookingStore.shared.identityRevision,
+           ParkWhizPurchase.isAllowedURL(checkout.url) {
             view.load(URLRequest(url: checkout.url))
         }
         return view
@@ -148,14 +240,14 @@ private struct ParkWhizWebView: UIViewRepresentable {
             parts.scheme = origin.protocol
             parts.host = origin.host
             if origin.port != 0 { parts.port = origin.port }
-            guard message.name == "ParkWhizBridge", let url = parts.url,
+            guard isCurrentIdentity, message.name == "ParkWhizBridge", let url = parts.url,
                   ParkWhizPurchase.isAllowedURL(url) else { return }
             ParkWhizBookingStore.shared.receive(message.body, origin: url, identityRevision: identityRevision)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = navigationAction.request.url, url.scheme?.lowercased() == "https",
+            guard isCurrentIdentity, let url = navigationAction.request.url, url.scheme?.lowercased() == "https",
                   url.user == nil, url.password == nil else {
                 decisionHandler(.cancel)
                 return
@@ -163,8 +255,8 @@ private struct ParkWhizWebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            Log.warning(label: "ParkWhizBooking", "Parking checkout navigation failed: \((error as NSError).code)")
+        private var isCurrentIdentity: Bool {
+            identityRevision == ParkWhizBookingStore.shared.identityRevision
         }
     }
 

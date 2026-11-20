@@ -188,6 +188,7 @@ struct FnbItem: Identifiable {
     let originalCents: Int?
     let image: URL?
     let modifierGroups: [[String: Any]]
+    let isAvailable: Bool
     let categoryOrder: Int
     let order: Int
 
@@ -213,16 +214,26 @@ struct FnbItem: Identifiable {
             seenCategories.insert(categoryId)
             var unorderable = false
             var seenGroups = Set<String>()
-            let rawGroups = PayloadRead.rows(product["modifierGroups"], limit: 100)
-            if rawGroups.count > 20 { unorderable = true }
+            let groupPayload = product["modifierGroups"]
+            let rawGroups = PayloadRead.rows(groupPayload, limit: 21)
+            let groupCount = (groupPayload as? [Any])?.count ?? (groupPayload == nil ? 0 : 1)
+            if groupCount > 20 || rawGroups.count != groupCount { unorderable = true }
             let groups = rawGroups.prefix(20).compactMap { group -> [String: Any]? in
-                let rawMinimum = group["minimumSelections"] ?? group["minQuantity"]
-                let parsedMinimum = PayloadRead.int(rawMinimum, maximum: 50)
-                if rawMinimum != nil, parsedMinimum == nil { unorderable = true }
-                let minimum = parsedMinimum ?? 0
-                guard let groupId = PayloadRead.id(group["id"]),
-                      PayloadRead.bool(group["showPublic"]) != false else {
+                let minima = [group["minimumSelections"], group["minQuantity"]].compactMap { $0 }
+                let maxima = [group["maximumSelections"], group["maxQuantity"]].compactMap { $0 }
+                let parsedMinima = minima.compactMap { PayloadRead.int($0, maximum: 50) }
+                let parsedMaxima = maxima.compactMap { PayloadRead.int($0, maximum: 50) }
+                if parsedMinima.count != minima.count || parsedMaxima.count != maxima.count {
+                    unorderable = true
+                }
+                let minimum = parsedMinima.max() ?? 0
+                guard PayloadRead.bool(group["showPublic"]) != false else {
                     if minimum > 0 { unorderable = true }
+                    return nil
+                }
+                let name = PayloadRead.text(group["title"] ?? group["name"])
+                guard let groupId = PayloadRead.id(group["id"]), minimum == 0 || !name.isEmpty else {
+                    unorderable = true
                     return nil
                 }
                 guard seenGroups.insert(groupId).inserted else {
@@ -230,28 +241,38 @@ struct FnbItem: Identifiable {
                     return nil
                 }
                 var seenOptions = Set<String>()
-                let options = PayloadRead.rows(group["modifiers"], limit: 250)
+                let optionPayload = group["modifiers"]
+                if let rawOptions = optionPayload as? [Any], rawOptions.count > 250 {
+                    unorderable = true
+                }
+                let validOptions = PayloadRead.rows(optionPayload, limit: 250)
                     .filter {
-                        guard let optionId = PayloadRead.id($0["id"]) else { return false }
+                        guard let optionId = PayloadRead.id($0["id"]),
+                              let numericId = FnbHandoff.actionInteger(optionId) else { return false }
                         return PayloadRead.bool($0["isActive"]) != false &&
                         PayloadRead.bool($0["isArchived"]) != true &&
                         !PayloadRead.text($0["title"] ?? $0["name"]).isEmpty &&
-                        seenOptions.insert(optionId).inserted
+                        seenOptions.insert(String(numericId)).inserted
                     }
-                    .prefix(50)
+                if validOptions.count > 50 { unorderable = true }
+                let options = validOptions.prefix(50)
                 if options.isEmpty {
                     if minimum > 0 { unorderable = true }
                     return nil
                 }
                 let maxQuantity = PayloadRead.int(group["maxQuantity"], maximum: 50)
-                let maximumValue = group["maximumSelections"] ?? group["maxQuantity"]
-                let rawMaximum = PayloadRead.int(maximumValue, maximum: 50)
-                if maximumValue != nil, rawMaximum == nil { unorderable = true }
-                let multi = PayloadRead.bool(group["isMultiSelect"]) == true ||
-                    PayloadRead.bool(group["maxOnePerSelection"]) == false ||
-                    (maxQuantity.map { $0 > 1 } ?? false)
-                let maximum = min(options.count, rawMaximum.flatMap { $0 > 0 ? $0 : nil } ?? (multi ? options.count : 1))
-                if minimum > maximum { unorderable = true }
+                let multi = PayloadRead.bool(group["isMultiSelect"]) ??
+                    (PayloadRead.bool(group["maxOnePerSelection"]) == false ||
+                     (maxQuantity.map { $0 > 1 } ?? false))
+                // Only legacy maxQuantity uses zero as an unlimited sentinel.
+                let explicitMaximum = PayloadRead.int(group["maximumSelections"], maximum: 50) ?? options.count
+                let legacyMaximum = maxQuantity.flatMap { $0 > 0 ? $0 : nil } ?? options.count
+                let maximum = min(multi ? options.count : 1, explicitMaximum, legacyMaximum)
+                guard minimum <= maximum else {
+                    unorderable = true
+                    return nil
+                }
+                guard maximum > 0 else { return nil }
                 let normalizedOptions = options.map { option -> [String: Any] in
                     ["id": PayloadRead.id(option["id"]) ?? "",
                      "name": PayloadRead.text(option["title"] ?? option["name"], fallback: "Option"),
@@ -259,14 +280,10 @@ struct FnbItem: Identifiable {
                      "isSelected": PayloadRead.bool(option["isSelected"]) == true,
                      "isDefault": PayloadRead.bool(option["isDefault"]) == true]
                 }
-                return ["id": groupId, "name": PayloadRead.text(group["title"] ?? group["name"], fallback: "Options"),
+                return ["id": groupId, "name": name.isEmpty ? "Options" : name,
                         "modifiers": normalizedOptions, "isMultiSelect": multi,
                         "maxOnePerSelection": PayloadRead.bool(group["maxOnePerSelection"]) != false,
                         "minimumSelections": minimum, "maximumSelections": maximum]
-            }
-            guard !unorderable else {
-                Log.warning(label: "FnbCards", "Excluded an item with unavailable required modifier choices.")
-                return nil
             }
             guard let cents = PayloadRead.cents(product["eventPrice"]) ?? PayloadRead.cents(product["price"]) else { return nil }
             seen.insert(id)
@@ -279,6 +296,7 @@ struct FnbItem: Identifiable {
                            originalCents: originalCents,
                            image: PayloadRead.artwork(product),
                            modifierGroups: groups,
+                           isAvailable: !unorderable,
                            categoryOrder: PayloadRead.int(category?["orderId"], maximum: 100_000) ?? Int.max,
                            order: PayloadRead.int(entry["orderId"] ?? product["orderId"], maximum: 100_000) ?? Int.max))
         }
@@ -338,7 +356,7 @@ enum FnbHandoff {
 
     static let addToCartHint = "add-to-cart"
 
-    private static func actionInteger(_ value: String) -> Int64? {
+    fileprivate static func actionInteger(_ value: String) -> Int64? {
         guard value.range(of: #"^[0-9]{1,19}$"#, options: .regularExpression) != nil else { return nil }
         return Int64(value)
     }
@@ -350,6 +368,9 @@ enum FnbHandoff {
         for line in lines {
             guard let productId = actionInteger(line.id), let location = actionInteger(line.locationId),
                   productId >= 0, location >= 0, (1...99).contains(line.quantity) else { return nil }
+            if let item = menuItems[line.id] {
+                guard item.isAvailable, modifierSelections(line.selectedModifiers, match: item) else { return nil }
+            }
             var groups: [[String: Any]] = []
             var seenGroups = Set<String>()
             for selection in line.selectedModifiers {
@@ -378,6 +399,22 @@ enum FnbHandoff {
         }
         let fields = action("addToCart", fields: ["products": products])
         return JSONSerialization.isValidJSONObject(fields) ? fields : nil
+    }
+
+    private static func modifierSelections(_ selections: [FnbModifierSelection], match item: FnbItem) -> Bool {
+        let groups = Dictionary(grouping: selections.filter { !$0.modifiers.isEmpty }, by: \.groupId)
+        let knownIds = Set(item.modifierGroups.compactMap { PayloadRead.id($0["id"]) })
+        guard Set(groups.keys).isSubset(of: knownIds) else { return false }
+        return item.modifierGroups.allSatisfy { group in
+            guard let groupId = PayloadRead.id(group["id"]),
+                  let minimum = PayloadRead.int(group["minimumSelections"], maximum: 50),
+                  let maximum = PayloadRead.int(group["maximumSelections"], maximum: 50) else { return false }
+            let selected = groups[groupId] ?? []
+            guard selected.count <= 1 else { return false }
+            let options = Set(PayloadRead.rows(group["modifiers"], limit: 50).compactMap { PayloadRead.id($0["id"]) })
+            let ids = selected.first?.modifiers ?? []
+            return ids.count >= minimum && ids.count <= maximum && Set(ids).isSubset(of: options)
+        }
     }
 
     static func removeFromCart(locationId: String?, productId: String?, modifiers: String?) -> [String: Any]? {
@@ -449,6 +486,7 @@ struct FnbOrderSummary {
     let guid: String?
     let venueName: String?
     let lines: [FnbOrderLine]
+    let linesComplete: Bool
     let paid: Bool
     let subtotal: Int?
     let tax: Int?
@@ -475,13 +513,15 @@ struct FnbOrderSummary {
             if !name.isEmpty { locationNames[locationId] = name }
         }
         var seenLines = Set<String>()
+        let rawItems = order["items"] as? [Any]
         let mappedLines = PayloadRead.rows(order["items"], limit: 500).compactMap { row -> FnbOrderLine? in
             guard let line = FnbOrderLine.map(row, locationNames: locationNames),
                   seenLines.insert(line.id).inserted else { return nil }
             return line
         }
         let lines = Array(mappedLines.prefix(50))
-        let lineSum = FnbOrderLine.checkedSubtotal(lines)
+        let linesComplete = rawItems?.count == lines.count
+        let lineSum = linesComplete ? FnbOrderLine.checkedSubtotal(lines) : nil
         let subtotal = PayloadRead.cents(order["subtotalNet"]) ?? lineSum
         let tax = PayloadRead.cents(order["taxAddedNet"]) ?? 0
         let fees = PayloadRead.cents(order["feeAddedNet"]) ?? 0
@@ -489,11 +529,11 @@ struct FnbOrderSummary {
         let tip = PayloadRead.cents(order["tipNet"]) ?? 0
         return FnbOrderSummary(id: id, guid: PayloadRead.id(order["guid"]),
                                venueName: PayloadRead.text(PayloadRead.object(order["venue"])?["title"]).nilIfEmpty,
-                               lines: lines,
+                               lines: lines, linesComplete: linesComplete,
                                paid: PayloadRead.bool(order["isPaidInFull"] ?? order["isPaid"]) == true ||
                                (order["status"] as? String)?.lowercased() == "paid",
                                subtotal: subtotal, tax: tax, fees: fees, discount: abs(discount),
-                               tip: tip, total: PayloadRead.cents(order["totalNet"]) ?? lineSum)
+                               tip: tip, total: PayloadRead.cents(order["totalNet"]))
     }
 }
 
@@ -746,6 +786,7 @@ final class FnbOrderStore: ObservableObject {
     private var currentOrder: [String: Any]?
     private var pastOrders: [[String: Any]] = []
     private var seenCardIds = Set<String>()
+    private var latestLocationCardId: String?
     private var shownMenuCardIds = Set<String>()
     private var retiredSessionIds = Set<String>()
     private var activeSessionId: String?
@@ -763,13 +804,21 @@ final class FnbOrderStore: ObservableObject {
     }
 
     private func prepareCard(cardId: String, sessionId: String, stale: Bool) -> Bool {
-        guard !stale, let cardId = PayloadRead.id(cardId), let sessionId = PayloadRead.id(sessionId),
+        guard let cardId = PayloadRead.id(cardId),
+              prepareSession(cardId: cardId, sessionId: sessionId, stale: stale),
+              seenCardIds.insert(cardId).inserted else { return false }
+        return true
+    }
+
+    private func prepareSession(cardId: String, sessionId: String, stale: Bool) -> Bool {
+        guard !stale, PayloadRead.id(cardId) != nil, let sessionId = PayloadRead.id(sessionId),
               !retiredSessionIds.contains(sessionId) else { return false }
         if activeSessionId != sessionId {
             let hadActiveSession = activeSessionId != nil
             if let activeSessionId { retiredSessionIds.insert(activeSessionId) }
             activeSessionId = sessionId
             seenCardIds.removeAll()
+            latestLocationCardId = nil
             shownMenuCardIds.removeAll()
             closedMenuCardIds.removeAll()
             submittedMenuCardIds.removeAll()
@@ -783,7 +832,6 @@ final class FnbOrderStore: ObservableObject {
                 publish(["_sacramentokings": ["conciergeContext": ["fnbOrders": NSNull()]]])
             }
         }
-        guard seenCardIds.insert(cardId).inserted else { return false }
         return true
     }
 
@@ -796,9 +844,15 @@ final class FnbOrderStore: ObservableObject {
     /// Publishes the game once, and only from the newest locations card, so an older card that
     /// displays later can't overwrite it. Re-run when `isLatest` changes (rollback promotion).
     func locationsShown(cardId: String, sessionId: String, eventId: Any?, stale: Bool, isLatest: Bool) {
-        guard isLatest, prepareCard(cardId: cardId, sessionId: sessionId, stale: stale),
-              let event = PayloadRead.integerId(eventId), event >= 0 else { return }
-        publishOrders(["eventId": event])
+        guard isLatest, let cardId = PayloadRead.id(cardId),
+              prepareSession(cardId: cardId, sessionId: sessionId, stale: stale),
+              latestLocationCardId != cardId else { return }
+        latestLocationCardId = cardId
+        if let event = PayloadRead.integerId(eventId), event >= 0 {
+            publishOrders(["eventId": event])
+        } else {
+            publishOrders(["eventId": NSNull()])
+        }
     }
 
     /// Records a displayed menu so checkout can close it; it doesn't decide which menu is newest.
@@ -881,7 +935,7 @@ final class FnbOrderStore: ObservableObject {
 
     func canOpenCheckout(cardId: String, sessionId: String, orderId: String?, stale: Bool, isLatest: Bool,
                          unresolved: Bool) -> Bool {
-        isSessionActive(sessionId, stale: stale) &&
+        isLatest && isSessionActive(sessionId, stale: stale) &&
             (isOrderArchived(orderId) || (!unresolved &&
                 isCartActionable(cardId: cardId, sessionId: sessionId, orderId: orderId, stale: stale,
                                  isLatest: isLatest)))
@@ -905,6 +959,7 @@ final class FnbOrderStore: ObservableObject {
         if let activeSessionId { retiredSessionIds.insert(activeSessionId) }
         activeSessionId = nil
         seenCardIds.removeAll()
+        latestLocationCardId = nil
         shownMenuCardIds.removeAll()
         closedMenuCardIds.removeAll()
         submittedMenuCardIds.removeAll()
@@ -1097,6 +1152,10 @@ enum FnbStyle {
     static func accent(_ theme: ConciergeTheme) -> Color {
         color("--fnb-accent-color", theme: theme,
               fallback: theme.colors.productCardCtaButton.background.color)
+    }
+
+    static func textAccent(_ theme: ConciergeTheme) -> Color {
+        color("--fnb-text-accent-color", theme: theme, fallback: primaryText(theme))
     }
 
     static func onAccent(_ theme: ConciergeTheme) -> Color {

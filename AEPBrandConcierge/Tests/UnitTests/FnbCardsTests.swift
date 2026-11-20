@@ -63,8 +63,11 @@ final class FnbCardsTests: XCTestCase {
                                       options: .stage, openCheckout: nil)
         let empty = FnbCartCard(element: ["entity_info": ["id": "123", "items": []]],
                                 context: context, saveState: { _ in }, options: .stage, openCheckout: nil)
+        let incomplete = FnbCartCard(element: ["entity_info": ["id": "123", "items": [NSNull()]]],
+                                     context: context, saveState: { _ in }, options: .stage, openCheckout: nil)
         XCTAssertEqual(unavailable.emptyStateMessage, "This content isn't available right now.")
         XCTAssertEqual(empty.emptyStateMessage, "Your cart is empty.")
+        XCTAssertNil(incomplete.emptyStateMessage)
     }
 
     func testQuantityControlFitsMenuItemCard() throws {

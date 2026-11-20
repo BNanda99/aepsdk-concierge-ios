@@ -51,21 +51,24 @@ enum FnbCardRegistration {
         }
     }
 
-    static func receive(rendererId: String, element: [String: Any], context: [String: Any]) {
+    static func receive(rendererId: String, element: [String: Any], context: [String: Any],
+                        orderStore: FnbOrderStore = FnbCardRegistration.orders) {
         guard let cardId = context["cardId"] as? String,
               let sessionId = context["sessionId"] as? String else { return }
         let stale = context["isStale"] as? Bool == true
         let isLatest = context["isLatest"] as? Bool == true
         switch rendererId {
         case "kings.fnblocation":
-            orders.locationsShown(cardId: cardId, sessionId: sessionId, eventId: element["eventId"],
-                                  stale: stale, isLatest: isLatest)
+            guard !FnbStand.map(element["entity_info"]).isEmpty else { return }
+            let eventId = (element["rendererContext"] as? [String: Any])?["eventId"]
+            orderStore.locationsShown(cardId: cardId, sessionId: sessionId, eventId: eventId,
+                                      stale: stale, isLatest: isLatest)
         case "kings.menu":
-            orders.menuShown(cardId: cardId, sessionId: sessionId, stale: stale)
+            orderStore.menuShown(cardId: cardId, sessionId: sessionId, stale: stale)
         case "kings.fnbcart":
             let summary = FnbOrderSummary.map(element["entity_info"], fallbackId: element["entityId"])
-            orders.cartShown(cardId: cardId, sessionId: sessionId, orderId: summary?.id ?? element["entityId"],
-                             paid: summary?.paid == true, stale: stale, isLatest: isLatest)
+            orderStore.cartShown(cardId: cardId, sessionId: sessionId, orderId: summary?.id ?? element["entityId"],
+                                 paid: summary?.paid == true, stale: stale, isLatest: isLatest)
         default: break
         }
     }
@@ -177,7 +180,7 @@ struct FnbPrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Uses primary text for contrast against the card and an accent outline.
+/// Uses separate text and outline colors for contrast against the card.
 struct FnbOutlinedButtonStyle: ButtonStyle {
     @Environment(\.conciergeTheme) private var theme
     @Environment(\.isEnabled) private var isEnabled
@@ -186,7 +189,7 @@ struct FnbOutlinedButtonStyle: ButtonStyle {
         let height = max(44, FnbStyle.buttonHeight(theme))
         let shape = RoundedRectangle(cornerRadius: min(FnbStyle.buttonRadius(theme), height / 2),
                                      style: .continuous)
-        let color = isEnabled ? FnbStyle.primaryText(theme) : FnbStyle.secondaryText(theme)
+        let color = isEnabled ? FnbStyle.textAccent(theme) : FnbStyle.secondaryText(theme)
         return configuration.label
             .font(.subheadline.weight(.bold))
             .multilineTextAlignment(.center)
@@ -471,7 +474,7 @@ struct FnbMenuCard: View {
     private var statusMessage: some View {
         let message: String? = {
             switch status {
-            case "added": return "Added to cart. This menu is no longer active."
+            case "added": return "Your order request was sent. Check the cart to confirm."
             case "unconfirmed": return "We couldn't confirm the last add. Ask Concierge before retrying those items."
             case "submitting": return "Adding your items…"
             default: return actionable ? runtime.errorMessage : "This menu is no longer active."
@@ -528,7 +531,7 @@ struct FnbMenuCard: View {
 
     private func add(_ item: FnbItem, modifiers: [FnbModifierSelection],
                      quantity: Int = 1, note: String? = nil) {
-        guard editable, let locationId else { return }
+        guard editable, orderingAvailable, item.isAvailable, let locationId else { return }
         var modifierCents = 0
         for group in modifiers {
             let matching = item.modifierGroups.first { PayloadRead.id($0["id"]) == group.groupId }
@@ -559,6 +562,7 @@ struct FnbCartCard: View {
     let currencyCode: String
     let checkoutLabel: String
     let showMoreLabel: String?
+    private let summary: FnbOrderSummary?
     @Environment(\.openURL) private var openURL
     @State private var checkoutFailed = false
     @State private var checkoutOpening = false
@@ -575,32 +579,31 @@ struct FnbCartCard: View {
         self.currencyCode = options.currencyCode
         self.checkoutLabel = options.checkoutLabel
         self.showMoreLabel = options.showMoreLabel
+        self.summary = FnbOrderSummary.map(element["entity_info"], fallbackId: element["entityId"])
         let state = context["state"] as? [String: Any] ?? [:]
         _runtime = StateObject(wrappedValue: FnbActionRuntime(state: state, save: saveState))
     }
 
     private var order: [String: Any] { PayloadRead.object(element["entity_info"]) ?? [:] }
-    private var summary: FnbOrderSummary? {
-        FnbOrderSummary.map(element["entity_info"], fallbackId: element["entityId"])
-    }
     private var lines: [FnbOrderLine] { summary?.lines ?? [] }
+    private var linesComplete: Bool { summary?.linesComplete == true }
     private var orderId: String? { summary?.id }
     private var paid: Bool { summary?.paid == true }
     private var cardId: String { context["cardId"] as? String ?? "" }
     private var sessionId: String { context["sessionId"] as? String ?? "" }
     private var stale: Bool { context["isStale"] as? Bool == true }
     private var isLatest: Bool { context["isLatest"] as? Bool == true }
-    private var archived: Bool { orders.isOrderArchived(orderId) }
+    private var archived: Bool { orders.isSessionActive(sessionId, stale: stale) && orders.isOrderArchived(orderId) }
     private var actionable: Bool {
         orders.isCartActionable(cardId: cardId, sessionId: sessionId, orderId: orderId, stale: stale,
                                 isLatest: isLatest)
     }
     private var blocked: Bool {
-        runtime.activeAction != nil ||
+        (actionable && runtime.activeAction != nil) ||
         context["isBusy"] as? Bool == true || !orders.isSessionActive(sessionId, stale: stale)
     }
     private var unresolvedOrder: Bool {
-        !runtime.unconfirmed.isEmpty || !runtime.pendingRemovals.isEmpty
+        actionable && (!runtime.unconfirmed.isEmpty || !runtime.pendingRemovals.isEmpty)
     }
     private var checkoutAllowed: Bool {
         orders.canOpenCheckout(cardId: cardId, sessionId: sessionId, orderId: orderId,
@@ -615,7 +618,7 @@ struct FnbCartCard: View {
 
     var emptyStateMessage: String? {
         if orderId == nil { return "This content isn't available right now." }
-        return lines.isEmpty ? "Your cart is empty." : nil
+        return linesComplete && lines.isEmpty ? "Your cart is empty." : nil
     }
 
     var body: some View {
@@ -626,20 +629,22 @@ struct FnbCartCard: View {
                 Text(emptyStateMessage)
                     .font(.subheadline)
                     .foregroundColor(FnbStyle.secondaryText(theme))
-            } else {
+            } else if !lines.isEmpty {
                 ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
                     if index > 0 { divider }
                     lineRow(line)
                 }
-                divider
-                totals
+                if linesComplete {
+                    divider
+                    totals
+                }
             }
             notices
             if paid {
                 Text("Paid. Your order is being prepared.")
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(FnbStyle.secondaryText(theme))
-            } else if let checkout, !lines.isEmpty {
+            } else if let checkout, !lines.isEmpty || !linesComplete || archived {
                 Button(checkoutLabel) { open(checkout) }
                     .buttonStyle(FnbPrimaryButtonStyle())
                     .disabled(blocked || !checkoutAllowed || checkoutOpening)
@@ -692,7 +697,7 @@ struct FnbCartCard: View {
     }
 
     private func lineRow(_ line: FnbOrderLine) -> some View {
-        let removing = runtime.pendingRemovals.contains("remove:\(line.id)")
+        let removing = actionable && linesComplete && runtime.pendingRemovals.contains("remove:\(line.id)")
         let textColor = removing ? FnbStyle.secondaryText(theme) : FnbStyle.primaryText(theme)
         let detail = [line.modifiers, line.note.map { "note: \($0)" }, line.standName]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
@@ -720,7 +725,7 @@ struct FnbCartCard: View {
                         .font(.caption)
                         .foregroundColor(FnbStyle.secondaryText(theme))
                 } else if !paid {
-                    let enabled = !blocked && actionable && orderId != nil &&
+                    let enabled = !blocked && actionable && linesComplete && orderId != nil &&
                         !runtime.unconfirmed.contains("remove:\(line.id)") &&
                         !orders.removals.contains(FnbOrderStore.removalKey(orderId: orderId ?? "", line: line))
                     Button("Remove") { remove(line) }
@@ -743,12 +748,22 @@ struct FnbCartCard: View {
             if let fees = summary?.fees, fees > 0 { totalRow("Fees", cents: fees) }
             if let tip = summary?.tip, tip > 0 { totalRow("Tip", cents: tip) }
             totalRow("Tax", cents: summary?.tax)
-            totalRow("Total", cents: summary?.total, emphasized: true)
+            HStack(alignment: .firstTextBaseline) {
+                Text("Total")
+                Spacer(minLength: 8)
+                if let total = summary?.total {
+                    Text(FnbStyle.price(cents: total, currencyCode: currencyCode))
+                } else {
+                    Text("Unavailable").foregroundColor(FnbStyle.secondaryText(theme))
+                }
+            }
+            .font(.subheadline.weight(.bold))
+            .accessibilityElement(children: .combine)
         }
     }
 
     @ViewBuilder
-    private func totalRow(_ title: String, cents: Int?, emphasized: Bool = false) -> some View {
+    private func totalRow(_ title: String, cents: Int?) -> some View {
         if let cents {
             let amount = FnbStyle.price(cents: abs(cents), currencyCode: currencyCode)
             HStack(alignment: .firstTextBaseline) {
@@ -756,21 +771,31 @@ struct FnbCartCard: View {
                 Spacer(minLength: 8)
                 Text(cents < 0 ? "−\(amount)" : amount)
             }
-            .font(emphasized ? .subheadline.weight(.bold) : .footnote)
-            .foregroundColor(emphasized ? FnbStyle.primaryText(theme) : FnbStyle.secondaryText(theme))
+            .font(.footnote)
+            .foregroundColor(FnbStyle.secondaryText(theme))
             .accessibilityElement(children: .combine)
         }
     }
 
     @ViewBuilder
     private var notices: some View {
-        if let error = runtime.errorMessage { errorText(error) }
-        if checkoutFailed { errorText("Checkout could not be opened. Please try again.") }
-        if !runtime.unconfirmed.isEmpty {
-            noticeText("We couldn't confirm the last action. Ask Concierge for the latest cart.")
+        if summary != nil, !linesComplete {
+            noticeText("Some cart items couldn't be displayed. Review the full order in checkout.")
         }
-        if !runtime.pendingRemovals.isEmpty {
-            noticeText("Waiting for an updated order from the restaurant.")
+        if archived {
+            noticeText("Checkout opened. New items will start a new order.")
+        }
+        if checkoutFailed, isLatest, actionable || archived {
+            errorText("Checkout could not be opened. Please try again.")
+        }
+        if actionable {
+            if let error = runtime.errorMessage { errorText(error) }
+            if !runtime.unconfirmed.isEmpty {
+                noticeText("We couldn't confirm the last action. Ask Concierge for the latest cart.")
+            }
+            if linesComplete, !runtime.pendingRemovals.isEmpty {
+                noticeText("Waiting for an updated order from the restaurant.")
+            }
         }
     }
 
@@ -808,7 +833,7 @@ struct FnbCartCard: View {
     }
 
     private func remove(_ line: FnbOrderLine) {
-        guard !blocked, !paid, actionable, let orderId,
+        guard !blocked, !paid, actionable, linesComplete, let orderId,
               !runtime.unconfirmed.contains("remove:\(line.id)"),
               !runtime.pendingRemovals.contains("remove:\(line.id)") else { return }
         guard let fields = FnbHandoff.removeFromCart(locationId: line.locationId,

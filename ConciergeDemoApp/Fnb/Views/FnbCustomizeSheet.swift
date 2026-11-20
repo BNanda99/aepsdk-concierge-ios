@@ -80,10 +80,10 @@ struct FnbCustomizeSheet: View {
 
     private func isSatisfied(_ group: ModifierGroup) -> Bool {
         let count = selections[group.id]?.count ?? 0
-        return count >= group.minimum && count <= max(group.minimum, group.maximum)
+        return count >= group.minimum && count <= group.maximum
     }
 
-    private var isValid: Bool { groups.allSatisfy(isSatisfied) }
+    private var isValid: Bool { item.isAvailable && groups.allSatisfy(isSatisfied) }
 
     private var lineTotalCents: Int? {
         var unitCents = item.cents
@@ -249,7 +249,7 @@ struct FnbCustomizeSheet: View {
             HStack(spacing: 12) {
                 Image(systemName: indicator)
                     .font(.title3)
-                    .foregroundColor(isSelected ? FnbStyle.accent(theme) : FnbStyle.secondaryText(theme))
+                    .foregroundColor(isSelected ? FnbStyle.textAccent(theme) : FnbStyle.secondaryText(theme))
                     .accessibilityHidden(true)
                 Text(title)
                     .font(.subheadline)
