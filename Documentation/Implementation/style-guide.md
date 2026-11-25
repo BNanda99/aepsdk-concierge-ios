@@ -325,6 +325,8 @@ Feature toggles and interaction configuration.
 
 Both notes flags default to `true`. Set both to `false` to hide the free-form Notes field while keeping the feedback options and submission buttons. Partial overrides are supported, and the flags are preserved when a theme is encoded and decoded again. Each flag is decoded independently — a malformed value for one flag falls back to `true` without discarding a valid value for the other, and unrelated malformed component styles do not discard them. Other component styles continue to be derived from the canonical theme tokens.
 
+In modal mode, the form content scrolls while Submit and Cancel (when enabled) remain outside the scrolling area above the keyboard. Tap Done in the keyboard toolbar or tap the modal backdrop to dismiss the keyboard without closing the feedback form.
+
 ### Citations
 
 | JSON Key | Type | Default | Description |
@@ -339,6 +341,11 @@ Both notes flags default to `true`. Set both to `false` to hide the free-form No
 | `behavior.privacyNotice.title` | string | `"Privacy Notice"` | Inline privacy notice heading; a blank title hides the heading |
 | `behavior.privacyNotice.text` | string | `""` | Privacy notice content with optional `{Label}` link placeholders; absent, empty, or whitespace-only text hides the notice |
 | `behavior.privacyNotice.links` | array | `[]` | Links with `text` and `url`, matching `{Label}` placeholders by exact `text`; uses the same format as `disclaimer.links` |
+| `behavior.privacyNotice.presentation` | string | `"inline"` | `"inline"` shows the full notice; `"collapsible"` starts collapsed and expands in place |
+| `behavior.privacyNotice.summary` | string | `""` | Optional approved summary for the collapsed notice; blank uses a line-limited preview |
+| `behavior.privacyNotice.collapsedMaxLines` | positive integer | `3` | Maximum preview lines when no summary is provided; short notices have no toggle |
+| `behavior.privacyNotice.readMoreLabel` | string | `"Read more"` | Localizable expansion button label |
+| `behavior.privacyNotice.showLessLabel` | string | `"Show less"` | Localizable collapse button label |
 
 The informational notice appears above the first submitted user query (typed, voice, or welcome
 suggestion) and remains in scrolling history after errors or chat hide/show. Drafts and app-only
@@ -353,6 +360,15 @@ then universal link, in-app web view, or system), tracked with link-click origin
 Unmatched labels render without braces. The card uses the concierge message background, a border
 derived from `--message-concierge-text`, and the card radius; no privacy-specific CSS
 tokens are added.
+
+Use `"presentation": "collapsible"` to opt in without changing existing themes. Supply an
+approved `summary` to keep essential information visible; summaries are not truncated.
+Without a summary, the full text is previewed with an ellipsis only when it exceeds
+`collapsedMaxLines`. Expansion pushes subsequent messages down; collapse restores the compact
+card. There is no automatic animation or modal. Links become interactive in the full notice,
+using the same routing and tracking as inline notices. Supply translated button labels in the
+theme. Invalid presentation values, nonpositive line limits, and incorrect field types fail
+theme decoding. The Demo theme includes sample copy for local testing, not production legal copy.
 
 ### Example
 
@@ -703,6 +719,7 @@ Visual styling using CSS-like variable names. All properties in the `theme` obje
 | CSS Variable | Swift Property | Type | Default | Description |
 |--------------|----------------|------|---------|-------------|
 | `--input-send-icon-color` | `colors.input.sendIconColor` | `Color?` | `nil` | Default send button icon tint |
+| `--input-clear-icon-color` | `colors.input.clearIconColor` | `Color?` | `nil` | Clear (X) icon tint beside send when text is entered. Falls back to black. Set to `"#FFFFFF"` for a white icon on dark input backgrounds |
 | `--input-send-arrow-icon-color` | `colors.input.sendArrowIconColor` | `Color?` | `nil` | Arrow-style send button arrow color |
 | `--input-send-arrow-background-color` | `colors.input.sendArrowBackgroundColor` | `Color?` | `nil` | Arrow-style send button circle background |
 | `--input-send-arrow-background-gradient-start-color` | `colors.input.sendArrowBackgroundGradient` | `Color?` | `nil` | Arrow-style send button circle gradient start color. See [Gradients](#gradients). |
@@ -1012,7 +1029,12 @@ This example opts into agent-only padding with `--agent-message-padding`. Omit t
     "privacyNotice": {
       "title": "Privacy Notice",
       "text": "",
-      "links": []
+      "links": [],
+      "presentation": "inline",
+      "summary": "",
+      "collapsedMaxLines": 3,
+      "readMoreLabel": "Read more",
+      "showLessLabel": "Show less"
     }
   },
   "disclaimer": {
@@ -1200,6 +1222,7 @@ This example opts into agent-only padding with `--agent-message-padding`. Omit t
     "--cta-button-icon-size": "16px",
     "--header-title-font-size": "18px",
     "--input-send-icon-color": "",
+    "--input-clear-icon-color": "",
     "--input-send-arrow-icon-color": "",
     "--input-send-arrow-background-color": "",
     "--input-send-arrow-background-gradient-start-color": "",
@@ -1288,6 +1311,11 @@ This section documents which properties are fully implemented, partially impleme
 | `behavior.privacyNotice.title` | ✅ | PrivacyNoticeView heading above the first user query |
 | `behavior.privacyNotice.text` | ✅ | PrivacyNoticeView body; blank text hides the notice |
 | `behavior.privacyNotice.links` | ✅ | LinkedTextFormatter renders links in PrivacyNoticeView; taps route through ConciergeLinkHandler |
+| `behavior.privacyNotice.presentation` | ✅ | PrivacyNoticeView opt-in inline expansion |
+| `behavior.privacyNotice.summary` | ✅ | PrivacyNoticeView authored collapsed summary |
+| `behavior.privacyNotice.collapsedMaxLines` | ✅ | PrivacyNoticeView measured overflow preview |
+| `behavior.privacyNotice.readMoreLabel` | ✅ | PrivacyNoticeView expansion button |
+| `behavior.privacyNotice.showLessLabel` | ✅ | PrivacyNoticeView collapse button |
 
 ### Disclaimer
 
@@ -1409,6 +1437,7 @@ This section documents which properties are fully implemented, partially impleme
 | `--feedback-cancel-button-border-color` | ✅ | Used in FeedbackOverlayView Cancel button |
 | `--disclaimer-color` | ✅ | Used in ComposerDisclaimer via components.disclaimer.textColor |
 | `--input-send-icon-color` | ✅ | Used in ComposerSendButtonStyle |
+| `--input-clear-icon-color` | ✅ | Used in ComposerEditingView for the clear (X) icon |
 | `--input-send-arrow-icon-color` | ✅ | Used in ComposerEditingView for arrow-style send button |
 | `--input-send-arrow-background-color` | ✅ | Used in ComposerEditingView for arrow-style send button |
 | `--input-send-arrow-background-gradient-start-color` | ✅ | Used in ComposerEditingView for arrow-style send button gradient |

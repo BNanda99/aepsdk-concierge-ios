@@ -191,6 +191,7 @@
     "--input-focus-outline-color": "#8921FE",
     "--input-focus-outline-width": "2px",
     "--input-send-icon-color": "#FFFFFF",
+    "--input-clear-icon-color": "#FFFFFF",
     "--input-send-arrow-icon-color": "#FFFFFF",
     "--input-send-arrow-background-color": "#8921FE",
     "--input-mic-icon-color": "#FFFFFF",
